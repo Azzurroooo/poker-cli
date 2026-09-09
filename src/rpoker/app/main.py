@@ -7,7 +7,7 @@ from rich.console import Console
 
 from rpoker.app import lobby
 from rpoker.app.settings import Settings
-from rpoker.ui.prompts import Terminal
+from rpoker.ui.prompts import QuitApp, Terminal
 
 
 def main() -> None:
@@ -20,10 +20,11 @@ def main() -> None:
     terminal = Terminal(console)
     try:
         asyncio.run(lobby.run(terminal, settings))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, QuitApp):
         pass
     finally:
         terminal.close()
+        console.print("再见，下次再来！")
 
 
 if __name__ == "__main__":

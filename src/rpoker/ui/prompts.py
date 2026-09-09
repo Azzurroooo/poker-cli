@@ -85,6 +85,10 @@ class LineReader:
             return None
 
 
+class QuitApp(Exception):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class Option:
     label: str
@@ -205,9 +209,9 @@ class Terminal:
                     return False
 
     async def menu(self, title: str, options: list[Option], cancellable: bool = True) -> int | None:
-        self.print()
-        self.print(f"[bold]{title}[/bold]")
         if not self.tty:
+            self.print()
+            self.print(f"[bold]{title}[/bold]")
             for i, option in enumerate(options, 1):
                 self.print(f"  {i}. {option.label}" + (f"  [dim]{option.hint}[/dim]" if option.hint else ""))
             self.print(f"[dim]输入 1-{len(options)} 的编号{'，q 返回' if cancellable else ''}[/dim]")
@@ -221,10 +225,12 @@ class Terminal:
                     return None
                 self.print(f"[dim]无效编号，请输入 1-{len(options)}[/dim]")
         selected = 0
-        height = len(options) + 1
+        height = 0
         while True:
-            self._erase_above(height) if height else None
-            block = 0
+            if height:
+                self._erase_above(height)
+            self.print(f"[bold]{title}[/bold]")
+            block = 1
             for i, option in enumerate(options):
                 cursor = "[reverse] ▶ [/reverse]" if i == selected else "   "
                 hint = f"  [dim]{option.hint}[/dim]" if option.hint else ""
@@ -266,10 +272,12 @@ class Terminal:
                 if action is not None:
                     return action
                 self.print("[dim]无效输入[/dim]" + self._action_line(legal, theme))
+        ctrl_seen = False
         while True:
             key = await self._action_bar(legal, theme, view)
             if key is None:
                 return self._auto(legal)
+            ctrl_seen = key == "ctrl-c" and not ctrl_seen
             match key:
                 case "f":
                     return Action("fold")
@@ -285,6 +293,10 @@ class Terminal:
                     text = await self.ask("聊天：")
                     if text:
                         await send_chat(text)
+                case "ctrl-c":
+                    if await self.confirm("确定退出 realpoker？", default=False):
+                        raise QuitApp
+                    ctrl_seen = False
 
     def _action_line(self, legal: LegalActions, theme: Theme) -> str:
         parts = []
@@ -339,8 +351,8 @@ class Terminal:
                 bar.append(f"   ⏱ {gauge} {remaining}s", style=theme.bad if remaining <= 5 else theme.dim)
             self.print(bar)
             key = await self.key(0.25)
+            self._erase_above(1)
             if key is None:
-                self._erase_above(1)
                 continue
             return key
 

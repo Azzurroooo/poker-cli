@@ -27,17 +27,13 @@ def cards_row(cards: Sequence[Card | None], theme: Theme) -> Text:
 
 
 def big_card_lines(cards: Sequence[Card], theme: Theme) -> list[Text]:
-    top = Text(style=theme.border)
-    body = Text()
-    bottom = Text(style=theme.border)
-    for card in cards:
-        top.append("╭────╮ ")
+    line = Text()
+    for i, card in enumerate(cards):
+        if i:
+            line.append("  ")
         color = suit_color(card.suit, theme)
-        body.append("│ ", style=theme.border)
-        body.append(f"{rank_label(card.rank):<2}{card.suit} ", style=color)
-        body.append("│ ", style=theme.border)
-        bottom.append("╰────╯ ")
-    return [top, body, bottom]
+        line.append(f" {rank_label(card.rank)}{card.suit} ", style=f"bold {color}")
+    return [line]
 
 
 def back_lines(count: int, theme: Theme) -> list[Text]:
