@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import random
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
-from rpoker.domain.cards import STANDARD_52, Card, Suit, find_best_hand
+from rpoker.domain.cards import STANDARD_52, Card, Suit
 
 
 def card(spec: str) -> Card:

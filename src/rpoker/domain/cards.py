@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import random
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from itertools import combinations
-from typing import Sequence
 
 
 class Suit(StrEnum):

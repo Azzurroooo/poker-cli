@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import random
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
 from rpoker.domain.actions import Action, LegalActions
 from rpoker.domain.cards import Card, Deck, HandScore, best_five

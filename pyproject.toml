@@ -26,3 +26,7 @@ packages = ["src/rpoker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/rpoker/app/table_loop.py" = ["BLE001"]
+"src/rpoker/ui/prompts.py" = ["BLE001"]

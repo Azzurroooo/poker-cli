@@ -5,7 +5,6 @@ import random
 from rpoker.domain.actions import Action
 from rpoker.domain.views import Street
 from rpoker.engine.table import Table
-
 from tests.engine.helpers import build_deck, cards
 
 

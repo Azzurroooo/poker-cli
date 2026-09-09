@@ -1,5 +1,4 @@
 from rpoker.domain.cards import Card, HandKind, find_best_hand
-
 from tests.engine.helpers import card, cards
 
 
