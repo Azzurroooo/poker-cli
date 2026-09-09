@@ -12,9 +12,8 @@ class Settings:
     theme: str = "onedark"
     blinds: tuple[int, int] = (5, 10)
     starting_stack: int = 1000
-    max_seats: int = 9
+    table_size: int = 5
     act_seconds: float = 30.0
-    fill_bots: bool = True
 
     @staticmethod
     def path() -> Path:

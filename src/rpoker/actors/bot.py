@@ -7,6 +7,8 @@ from rpoker.domain.actions import Action
 from rpoker.domain.cards import STANDARD_52, find_best_hand
 from rpoker.domain.views import SeatView
 
+BOT_NAMES = ["小北", "阿棠", "老周", "绵绵", "大熊", "石头", "飞飞", "可可"]
+
 
 def win_probability(hole: tuple, community: tuple, rng: random.Random, samples: int = 150) -> float:
     known = set(hole) | set(community)

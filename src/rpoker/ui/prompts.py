@@ -6,10 +6,12 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Self
 
 from prompt_toolkit.input import create_input
 from prompt_toolkit.keys import Keys
 from rich.console import Console
+from rich.live import Live
 from rich.text import Text
 
 from rpoker.domain.actions import Action, LegalActions
@@ -56,35 +58,97 @@ class KeyReader:
         self._input.close()
 
 
+class LineReader:
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except OSError:
+                break
+            if not line:
+                break
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, line.strip().lower())
+        self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
+
+    async def get(self, timeout: float | None) -> str | None:
+        if timeout is None:
+            return await self._queue.get()
+        try:
+            return await asyncio.wait_for(self._queue.get(), timeout)
+        except TimeoutError:
+            return None
+
+
 @dataclass(frozen=True, slots=True)
 class Option:
     label: str
     hint: str = ""
 
 
+class FrameView:
+    """Live in-place refresh on a TTY; static reprint on pipes (rich Live never refreshes pipes)."""
+
+    def __init__(self, terminal: Terminal) -> None:
+        self._console = terminal.console
+        self._tty = terminal.tty
+        self._live: Live | None = None
+
+    def __enter__(self) -> Self:
+        if self._tty:
+            self._live = Live(console=self._console, refresh_per_second=4, transient=False)
+            self._live.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._live is not None:
+            self._live.stop()
+
+    def update(self, renderable) -> None:
+        if self._live is not None:
+            self._live.update(renderable)
+        else:
+            self._console.print(renderable)
+
+    def pause(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+
+    def resume(self) -> None:
+        if self._live is not None:
+            self._live.start()
+
+
 class Terminal:
     def __init__(self, console: Console) -> None:
         self.console = console
         self.tty = sys.stdin.isatty() and console.is_terminal
-        self._keys: KeyReader | None = KeyReader() if self.tty else None
+        self._keys: KeyReader | None = None
+        self._lines: LineReader | None = None
+
+    def frame_view(self) -> FrameView:
+        return FrameView(self)
 
     def close(self) -> None:
         if self._keys is not None:
             self._keys.close()
 
-    async def key(self, timeout: float | None) -> str | None:
-        if self._keys is not None:
-            return await self._keys.get(timeout)
-        if timeout is None:
-            return await self._line()
-        try:
-            return await asyncio.wait_for(self._line(), timeout)
-        except TimeoutError:
-            return None
+    def _reader(self) -> KeyReader | LineReader:
+        if self.tty:
+            if self._keys is None:
+                self._keys = KeyReader()
+            return self._keys
+        if self._lines is None:
+            self._lines = LineReader()
+        return self._lines
 
-    async def _line(self) -> str:
-        line = await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline)
-        return line.strip().lower()
+    async def key(self, timeout: float | None) -> str | None:
+        return await self._reader().get(timeout)
 
     def print(self, *renderables) -> None:
         self.console.print(*renderables)
@@ -99,8 +163,8 @@ class Terminal:
     async def ask(self, prompt: str, default: str = "") -> str:
         self.console.print(prompt + (f" [dim]（回车 = {default}）[/dim]" if default else ""))
         if not self.tty:
-            answer = await self._line()
-            return answer or default
+            answer = await self.key(None)
+            return default if answer is None or answer == "" else answer
         buffer = ""
         self._write("❯ ")
         while True:
@@ -127,7 +191,9 @@ class Terminal:
         suffix = "（Y/n）" if default else "（y/N）"
         self.print(f"{prompt}[dim]{suffix}[/dim]")
         while True:
-            key = await self.key(None) if self.tty else await self._line()
+            key = await self.key(None)
+            if key is None:
+                return False
             match key:
                 case "" | "enter":
                     return default
@@ -146,7 +212,9 @@ class Terminal:
                 self.print(f"  {i}. {option.label}" + (f"  [dim]{option.hint}[/dim]" if option.hint else ""))
             self.print(f"[dim]输入 1-{len(options)} 的编号{'，q 返回' if cancellable else ''}[/dim]")
             while True:
-                answer = await self._line()
+                answer = await self.key(None)
+                if answer is None:
+                    return None
                 if answer.isdigit() and 1 <= int(answer) <= len(options):
                     return int(answer) - 1
                 if cancellable and answer in ("q", "b"):
@@ -191,7 +259,9 @@ class Terminal:
             self.print()
             self.print(self._action_line(legal, theme))
             while True:
-                answer = await self._line()
+                answer = await self.key(None)
+                if answer is None:
+                    return self._auto(legal)
                 action = self._parse_action(answer, legal)
                 if action is not None:
                     return action
@@ -285,12 +355,12 @@ class Terminal:
         ]
         if not self.tty:
             while True:
-                answer = await self._line()
+                answer = await self.key(None)
+                if answer is None or answer in ("q", "escape"):
+                    return None
                 action = self._parse_action("r" + answer, legal)
                 if action is not None:
                     return action.amount
-                if answer in ("q", "escape"):
-                    return None
         while True:
             span = max(legal.max_raise_to - legal.min_raise_to, 1)
             filled = round((amount - legal.min_raise_to) / span * 20)

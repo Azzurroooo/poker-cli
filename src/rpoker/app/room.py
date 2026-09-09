@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import asyncio
+import random
+import socket
+from dataclasses import dataclass, field
+
+from rich.panel import Panel
+from rich.text import Text
+
+from rpoker.actors.bot import BOT_NAMES, BotActor
+from rpoker.app.table_loop import play_hand
+from rpoker.domain.actions import Action
+from rpoker.engine.table import Table
+from rpoker.net import beacon
+from rpoker.net.connector import TcpConnector
+from rpoker.net.messages import (
+    PORT_RANGE,
+    TCP_PORT,
+    Act,
+    Chat,
+    Error,
+    Hello,
+    Leave,
+    Result,
+    State,
+    Welcome,
+)
+from rpoker.ui.prompts import FrameView, Option, Terminal
+from rpoker.ui.table_view import render
+from rpoker.ui.tokens import THEMES, Theme
+
+
+@dataclass(slots=True)
+class _Conn:
+    connector: TcpConnector
+    name: str
+    seat: int
+    queue: asyncio.Queue[Act] = field(default_factory=asyncio.Queue)
+    alive: bool = True
+
+    def new_turn(self) -> None:
+        self.queue = asyncio.Queue()
+
+
+class Room:
+    def __init__(self, terminal: Terminal, settings, room_name: str) -> None:
+        self.terminal = terminal
+        self.settings = settings
+        self.room_name = room_name
+        self.theme: Theme = THEMES[settings.theme]
+        self.names: list[str | None] = [None] * settings.table_size
+        self.names[0] = settings.nickname
+        self.conns: list[_Conn] = []
+        self.started = False
+        self.port = 0
+        self._adv_task: asyncio.Task | None = None
+        self._server: asyncio.Server | None = None
+
+    async def run(self) -> None:
+        if not self._bind():
+            self.terminal.print("[red]本机端口被占用，无法创建房间。[/red]")
+            return
+        self._server = await asyncio.start_server(self._on_client, "", self.port)
+        self._adv_task = asyncio.create_task(beacon.advertise(self.port, self.room_name, self._status))
+        try:
+            await self._waiting()
+        finally:
+            await self._shutdown()
+
+    def _status(self) -> tuple[int, bool]:
+        return sum(1 for n in self.names if n is not None), self.started
+
+    def _bind(self) -> bool:
+        for port in range(TCP_PORT, TCP_PORT + PORT_RANGE):
+            sock = socket.socket()
+            try:
+                sock.bind(("", port))
+                self.port = port
+                return True
+            except OSError:
+                continue
+            finally:
+                sock.close()
+        return False
+
+    async def _on_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connector = TcpConnector(reader, writer)
+        try:
+            hello = await asyncio.wait_for(connector.recv(), timeout=5)
+            if not isinstance(hello, Hello):
+                raise TypeError("expected hello")
+            name = hello.name.strip() or "玩家"
+            seat = self._free_seat(name)
+            if seat is None:
+                await connector.send(Error("table_full"))
+                return
+            if self.started:
+                await connector.send(Error("started"))
+                return
+            conn = _Conn(connector, name, seat)
+            self.names[seat] = name
+            self.conns.append(conn)
+            await connector.send(
+                Welcome(seat, self.room_name, [n or "" for n in self.names], list(self.settings.blinds),
+                        self.settings.starting_stack, self.settings.act_seconds)
+            )
+            await self._say(f"系统：{name} 加入了房间")
+            await self._pump(conn)
+        except (TimeoutError, ValueError, ConnectionError, OSError):
+            await connector.close()
+
+    def _free_seat(self, name: str) -> int | None:
+        for i, taken in enumerate(self.names):
+            if taken is None:
+                return i
+            if taken == name:
+                return None
+        return None
+
+    async def _pump(self, conn: _Conn) -> None:
+        while True:
+            message = await conn.connector.recv()
+            if message is None or isinstance(message, (Leave, Hello)):
+                break
+            if isinstance(message, Act):
+                await conn.queue.put(message)
+            elif isinstance(message, Chat):
+                await self._say(f"{conn.name}：{message.text}")
+        conn.alive = False
+        if conn in self.conns:
+            self.conns.remove(conn)
+        if not self.started:
+            self.names[conn.seat] = None
+        await self._say(f"系统：{conn.name} 离开了房间")
+
+    async def _say(self, line: str) -> None:
+        print(line)
+        for conn in list(self.conns):
+            if not conn.alive:
+                continue
+            try:
+                await conn.connector.send(Chat(line))
+            except (ConnectionError, OSError):
+                conn.alive = False
+
+    async def _waiting(self) -> None:
+        terminal = self.terminal
+        ip = _lan_ip()
+        while True:
+            roster = self._roster(ip)
+            terminal.print(roster)
+            terminal.print("[dim]Enter 开始牌局 · M 聊天 · Q 关闭房间（等待牌友加入…）[/dim]")
+            key = await terminal.key(1.0)
+            if key is None:
+                self.terminal._erase_above(_height(roster))
+                continue
+            if key in ("enter", ""):
+                if sum(1 for n in self.names if n is not None) >= 2:
+                    self.terminal._erase_above(_height(roster))
+                    await self._play()
+                    return
+                terminal.print("[red]至少需要 2 名玩家才能开局。[/red]")
+                await terminal.key(1.5)
+                self.terminal._erase_above(1)
+            elif key == "q":
+                return
+            elif key == "m":
+                self.terminal._erase_above(_height(roster))
+                text = await terminal.ask("聊天：")
+                if text:
+                    await self._say(f"{self.settings.nickname}：{text}")
+            else:
+                self.terminal._erase_above(_height(roster))
+
+    def _roster(self, ip: str) -> str:
+        lines = [f"房间「{self.room_name}」  {ip}:{self.port}"]
+        for i, name in enumerate(self.names):
+            marker = "●D" if i == 0 else "  "
+            lines.append(f" {marker} {name or '（空位，开局由 bot 补齐）'}")
+        return "\n".join(lines)
+
+    async def _play(self) -> None:
+        self.started = True
+        self._adv_task_cancel()
+        rng = random.Random()
+        names = [n if n is not None else f"{BOT_NAMES[i % len(BOT_NAMES)]}（bot）" for i, n in enumerate(self.names)]
+        table = Table(names, [self.settings.starting_stack] * len(names), self.settings.blinds, rng,
+                      act_seconds=self.settings.act_seconds)
+        console = self.terminal.console
+        console.clear()
+        with self.terminal.frame_view() as frames:
+
+            async def broadcast(t: Table, result=None) -> None:
+                frames.update(render(t.seat_view(0), self.theme, result=result, title=self.room_name,
+                                     viewer=self.settings.nickname))
+                for conn in list(self.conns):
+                    if not conn.alive:
+                        continue
+                    conn.new_turn()
+                    try:
+                        await conn.connector.send(State(t.seat_view(conn.seat)))
+                        if result is not None:
+                            await conn.connector.send(Result(result))
+                    except (ConnectionError, OSError):
+                        conn.alive = False
+
+            actors: dict[int, object] = {}
+            for i, name in enumerate(names):
+                if i == 0:
+                    actors[i] = self._local_human(frames)
+                elif name.endswith("（bot）"):
+                    actors[i] = BotActor(rng)
+                else:
+                    actors[i] = self._remote_actor(next(c for c in self.conns if c.seat == i))
+
+            async def publish_result(t: Table) -> None:
+                await broadcast(t, t.hand_result)
+
+            while not table.finished:
+                await play_hand(table, actors, broadcast, publish_result)
+                frames.pause()
+                try:
+                    choice = await self.terminal.menu("本手结束", [Option("下一手"), Option("结束牌局并显示排名")],
+                                                      cancellable=False)
+                finally:
+                    frames.resume()
+                    console.clear()
+                    frames.update(render(table.seat_view(0), self.theme, title=self.room_name,
+                                         viewer=self.settings.nickname))
+                if choice != 0:
+                    break
+        self._standings(table)
+
+    def _local_human(self, frames: FrameView):
+        async def actor(view):
+            frames.pause()
+            try:
+                return await self.terminal.action(view, self.theme, send_chat=self._say)
+            finally:
+                frames.resume()
+
+        return actor
+
+    def _remote_actor(self, conn: _Conn):
+        async def actor(view):
+            message = await conn.queue.get()
+            return Action(message.kind, message.amount)
+
+        return actor
+
+    def _standings(self, table: Table) -> None:
+        stacks = sorted(((info.name, info.stack) for info in table.seat_view(None).seats),
+                        key=lambda pair: -pair[1])
+        lines = Text()
+        for place, (name, stack) in enumerate(stacks, 1):
+            lines.append(f"第 {place} 名   {name}   {stack:,}\n")
+        self.terminal.print(Panel(lines, title="最终排名", border_style=self.theme.gold))
+
+    def _adv_task_cancel(self) -> None:
+        if self._adv_task is not None:
+            self._adv_task.cancel()
+
+    async def _shutdown(self) -> None:
+        self._adv_task_cancel()
+        for conn in list(self.conns):
+            await conn.connector.close()
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+
+
+def _height(text: str) -> int:
+    return text.count("\n") + 1
+
+
+def _lan_ip() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
