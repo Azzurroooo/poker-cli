@@ -18,7 +18,6 @@ consumed = 0
 
 
 def main() -> None:
-    global consumed
     tmp = tempfile.mkdtemp(prefix="rp-smoke-")
     env = dict(os.environ, APPDATA=tmp, PYTHONPATH=os.path.join(ROOT, "src"), PYTHONIOENCODING="utf-8")
     proc = subprocess.Popen(
@@ -28,8 +27,7 @@ def main() -> None:
     buffer: list[str] = []
 
     def reader() -> None:
-        for line in proc.stdout:
-            buffer.append(line)
+        buffer.extend(proc.stdout)
 
     threading.Thread(target=reader, daemon=True).start()
 
