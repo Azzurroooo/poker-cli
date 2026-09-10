@@ -43,10 +43,27 @@ In-game keys:
 | Key | Action |
 |---|---|
 | `F` / `C` / `R` / `A` | Fold / Check or Call / Raise / All-in (first-letter shortcuts) |
-| `←` `→` | Adjust the raise amount (also 1 min / 2 half-pot / 3 pot / 4 all-in) |
+| `←` `→` | Adjust the raise amount (`Shift` for large steps; also 1 min / 2 half-pot / 3 pot / 4 all-in) |
 | `↑` `↓` + `Enter` | Menu selection (number keys also work) |
-| `M` | Send chat on your turn |
+| `M` | Chat — available any time during the game, typed inside the frame |
+| `V` | Toggle rich / simple display mode (saved instantly) |
+| `L` | Hand history & chat overlay |
+| `?` | Help overlay |
+| `Ctrl-C` | Quit with confirmation |
 | `Q` | Host closes the room from the waiting area |
+
+## Display modes
+
+- **Rich** (default): a stable single-frame table — bordered seat boxes with the hero anchored
+  at the bottom, a centred board panel with the pot as its title, real card faces
+  (11x9 hero cards, 6x5 board, 5x4 mini), deal/flip and showdown sequences with a pot
+  pulse and a thinking indicator for bots.
+- **Simple**: the same facts in compact single-line text — ideal for narrow terminals
+  (below 70x24 it is chosen automatically), slow links, or minimalists. An information-parity
+  test guarantees no game fact is lost in either mode.
+
+Both modes draw through one alternate-screen frame that refreshes only when content
+actually changes, so the table never flickers or scrolls.
 
 When the action timer expires it auto-checks/folds; when a player disconnects the system plays their hand to the end — the game never stalls.
 
@@ -59,15 +76,17 @@ Standard No-Limit Texas Hold'em: blind and button rotation, heads-up special cas
 - No joining once a hand has started (joins in the waiting area are unrestricted); a disconnected player's seat cannot be taken over.
 - When broadcast cannot cross subnets or isolated switches, join via manual IP entry (the host's waiting area shows the local IP).
 - On Windows the first run raises a firewall prompt — allow it for private networks; same-machine play does not need this.
-- Chat entry points: the host in the waiting area and on their turn, clients on their own turn prompt (`M`).
+- Chat: the host in the waiting area; during a hand anyone can chat with `M` from inside the frame.
 
 On Windows, prefer Windows Terminal; if card suits render incorrectly, run `chcp 65001` first.
 
 ## Development
 
 ```bash
-uv run pytest              # 48 engine/protocol/UI tests
+uv run pytest              # 101 engine/protocol/UI tests
 uv run python tests/e2e_lan.py   # Two-process end-to-end game (create → discover → join → play → settle)
+uv run python tests/smoke_local.py  # Scripted single-player session smoke
+uv run python -m rpoker.ui.showcase  # Render every card/seat/frame state
 uv run ruff check src tests
 ```
 
