@@ -5,9 +5,10 @@ import random
 from rpoker.actors.bot import BOT_NAMES, BotActor
 from rpoker.app.table_loop import play_hand
 from rpoker.engine.table import Table
-from rpoker.ui.prompts import FrameView, Option, Terminal
-from rpoker.ui.render import render
-from rpoker.ui.tokens import THEMES, Theme
+from rpoker.ui.prompts import Option, Terminal
+from rpoker.ui.render import FrameContext
+from rpoker.ui.screen import GameScreen
+from rpoker.ui.tokens import THEMES
 
 
 async def run_local(terminal: Terminal, nickname: str, settings) -> None:
@@ -17,25 +18,28 @@ async def run_local(terminal: Terminal, nickname: str, settings) -> None:
     rng = random.Random()
     table = Table(names, [settings.starting_stack] * len(names), settings.blinds, rng, act_seconds=settings.act_seconds)
     console.clear()
-    with terminal.frame_view() as frames:
+    screen = GameScreen(
+        terminal,
+        FrameContext(theme, "本地练习", nickname, settings.blinds),
+        settings.act_seconds,
+    )
+    await screen.start()
+    try:
 
         async def broadcast(t: Table, result=None) -> None:
-            frames.update(render(t.seat_view(0), theme, result=result, title="本地练习", viewer=nickname))
+            await screen.show(t.seat_view(0), result)
 
-        actors: dict[int, object] = {i: BotActor(rng) for i in range(1, len(names))}
-        actors[0] = _human(terminal, theme, frames)
+        actors: dict[int, object] = {0: screen.actor()}
+        actors.update({i: BotActor(rng) for i in range(1, len(names))})
 
+        options = [Option("下一手"), Option("回到主菜单")]
         while not table.finished:
             await play_hand(table, actors, broadcast, _result_publisher(broadcast))
-            frames.pause()
-            try:
-                choice = await terminal.menu("本手结束", [Option("下一手"), Option("回到主菜单")], cancellable=False)
-            finally:
-                frames.resume()
-                console.clear()
-                frames.update(render(table.seat_view(0), theme, title="本地练习", viewer=nickname))
+            choice = await screen.interlude(table.hand_result, "本手结束", options)
             if choice != 0:
                 break
+    finally:
+        await screen.close()
     if table.finished:
         console.print("牌桌结束：只剩一名有筹码的玩家。", style=theme.gold)
 
@@ -45,14 +49,3 @@ def _result_publisher(broadcast):
         await broadcast(table, table.hand_result)
 
     return publish_result
-
-
-def _human(terminal: Terminal, theme: Theme, frames: FrameView):
-    async def actor(view):
-        frames.pause()
-        try:
-            return await terminal.action(view, theme)
-        finally:
-            frames.resume()
-
-    return actor

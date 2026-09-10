@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from dataclasses import dataclass
 
 from rich.console import Group
 from rich.panel import Panel
@@ -11,6 +11,7 @@ from rpoker.domain.cards import find_best_hand, rank_label
 from rpoker.domain.views import SeatInfo, SeatView, Street
 from rpoker.engine.table import HandResult
 from rpoker.ui.cards import card_text, suit_style
+from rpoker.ui.panels import ActionPanel
 from rpoker.ui.tokens import Theme
 
 STREET_LABELS = {
@@ -24,9 +25,72 @@ STREET_LABELS = {
 
 _COMMUNITY_SLOTS = {Street.PREFLOP: 0, Street.FLOP: 3, Street.TURN: 4, Street.RIVER: 5, Street.HAND_OVER: 5}
 
+_LOG_LINES = 4
+_GAUGE_CELLS = 10
+_SLIDER_CELLS = 16
+
+
+@dataclass(frozen=True, slots=True)
+class FrameContext:
+    theme: Theme
+    title: str
+    viewer: str | None
+    blinds: tuple[int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class UiState:
+    panel: ActionPanel | None = None
+    countdown: int | None = None
+    confirm_quit: bool = False
+    chat: tuple[str, ...] = ()
+
+
+def simple_frame(view: SeatView, result: HandResult | None, ui: UiState, ctx: FrameContext) -> Group:
+    theme = ctx.theme
+    parts: list = [
+        _header(view, ctx),
+        Text(),
+        _seats_block(view, ctx.viewer, theme),
+        Text(),
+        _board(view, theme),
+        Text(),
+        *_hole_block(view, theme),
+        Text(),
+        _log_block(view, ui.chat, theme),
+        _action_slot(view, ui, ctx),
+        _keybar(theme),
+    ]
+    return Group(*parts)
+
+
+def interlude_summary(result: HandResult, theme: Theme) -> Panel:
+    body = Text()
+    for i, award in enumerate(result.awards):
+        if i:
+            body.append("\n")
+        body.append(f"🏆 {award.name} +{_fmt(award.amount)}", style=theme.gold)
+        if award.score is not None:
+            body.append(f"  {award.score.label()}", style=theme.good)
+    if not result.fold_win:
+        body.append("\n")
+        for name, hole in result.reveal.items():
+            body.append(f"\n{name} ").append(
+                " ".join(str(c) for c in hole), style=theme.fg
+            ).append(f"  用 {result.best[name]}", style=theme.dim)
+    return Panel(body, title="本手结算", border_style=theme.gold)
+
 
 def _fmt(n: int) -> str:
     return f"{n:,}"
+
+
+def _header(view: SeatView, ctx: FrameContext) -> Text:
+    header = Text()
+    header.append("♠ ♥ ♦ ♣ ", style=ctx.theme.accent)
+    header.append(f"{ctx.title} · 第 {_fmt(view.hand_no)} 手 · {STREET_LABELS[view.street]}"
+                  f" · 盲注 {ctx.blinds[0]}/{ctx.blinds[1]}", style=ctx.theme.fg)
+    return header
 
 
 def _seat_cell(info: SeatInfo, view: SeatView, viewer: str | None, theme: Theme) -> Text:
@@ -79,17 +143,25 @@ def _board(view: SeatView, theme: Theme) -> Text:
     return row
 
 
-def _hero_cards(hole: Sequence, theme: Theme) -> Text:
-    line = Text()
-    for i, card in enumerate(hole):
+def _hole_block(view: SeatView, theme: Theme) -> list:
+    if not view.hole:
+        return [Text(), Text(), Text()]
+    cards = Text()
+    for i, card in enumerate(view.hole):
         if i:
-            line.append("  ")
-        line.append(f" {rank_label(card.rank)}{card.suit} ", style=f"bold {suit_style(card, theme)}")
-    return line
+            cards.append("  ")
+        cards.append(f" {rank_label(card.rank)}{card.suit} ", style=f"bold {suit_style(card, theme)}")
+    label = Text("你的手牌", style=theme.dim)
+    if len(view.community) >= 3:
+        mine = Text(find_best_hand((*view.hole, *view.community)).label(), style=theme.dim)
+    else:
+        mine = Text()
+    return [label, cards, mine]
 
 
-def _log_block(view: SeatView, theme: Theme) -> Text:
-    lines = view.log[-7:]
+def _log_block(view: SeatView, chat: tuple[str, ...], theme: Theme) -> Text:
+    entries = [*view.log, *chat]
+    lines = entries[-_LOG_LINES:]
     block = Text()
     for i, entry in enumerate(lines):
         if i:
@@ -99,42 +171,42 @@ def _log_block(view: SeatView, theme: Theme) -> Text:
     return block
 
 
-def _result_block(result: HandResult, theme: Theme) -> Panel:
-    body = Text()
-    for i, award in enumerate(result.awards):
-        if i:
-            body.append("\n")
-        body.append(f"🏆 {award.name} +{_fmt(award.amount)}", style=theme.gold)
-        if award.score is not None:
-            body.append(f"  {award.score.label()}", style=theme.good)
-    if not result.fold_win:
-        body.append("\n")
-        for name, hole in result.reveal.items():
-            body.append(f"\n{name} ").append(
-                " ".join(str(c) for c in hole), style=theme.fg
-            ).append(f"  用 {result.best[name]}", style=theme.dim)
-    return Panel(body, title="本手结算", border_style=theme.gold)
+def _action_slot(view: SeatView, ui: UiState, ctx: FrameContext) -> Text:
+    theme = ctx.theme
+    if ui.confirm_quit:
+        return Text("再按 Enter / Ctrl-C 确认退出 · Esc 取消", style=theme.bad)
+    if ui.panel is not None:
+        return _panel_slot(ui.panel, ui.countdown, theme)
+    if view.to_act is not None:
+        return Text(f"等待 {view.seats[view.to_act].name} 行动…", style=theme.dim)
+    return Text()
 
 
-def render(view: SeatView, theme: Theme, result: HandResult | None = None, title: str = "牌局", viewer: str | None = None) -> Group:
-    parts: list = []
-    header = Text()
-    header.append("♠ ♥ ♦ ♣ ", style=theme.accent)
-    header.append(f"{title} · 第 {_fmt(view.hand_no)} 手 · {STREET_LABELS[view.street]}", style=theme.fg)
-    parts.append(header)
-    parts.append(Text())
-    parts.append(_seats_block(view, viewer, theme))
-    parts.append(Text())
-    parts.append(_board(view, theme))
-    if view.hole:
-        parts.append(Text())
-        parts.append(Text("你的手牌", style=theme.dim))
-        parts.append(_hero_cards(view.hole, theme))
-        if len(view.community) >= 3:
-            parts.append(Text(find_best_hand((*view.hole, *view.community)).label(), style=theme.dim))
-    parts.append(Text())
-    parts.append(_log_block(view, theme))
-    if result is not None:
-        parts.append(Text())
-        parts.append(_result_block(result, theme))
-    return Group(*parts)
+def _panel_slot(panel: ActionPanel, countdown: int | None, theme: Theme) -> Text:
+    line = Text()
+    if panel.raising:
+        low, high = panel.legal.min_raise_to, panel.legal.max_raise_to
+        span = max(high - low, 1)
+        filled = round((panel.amount - low) / span * _SLIDER_CELLS)
+        line.append("加注至 ", style=theme.fg)
+        line.append(f"{panel.amount:,}", style=theme.gold)
+        line.append(" ◀" + "━" * filled + "●" + "━" * (_SLIDER_CELLS - filled) + "▶ ", style=theme.dim)
+        line.append(f"{high:,}", style=theme.dim)
+        line.append("  1最小 2半池 3满池 4全下 · Enter 确认 · Esc 返回", style=theme.dim)
+    else:
+        for i, item in enumerate(panel.items()):
+            if i:
+                line.append("  ")
+            if i == panel.selected:
+                line.append("▸ ", style=theme.accent)
+            line.append(f"[{item.hotkey}]", style=theme.accent)
+            line.append(f" {item.label}", style=theme.fg)
+    if countdown is not None:
+        filled = min(countdown // 3, _GAUGE_CELLS)
+        gauge = "█" * filled + "░" * (_GAUGE_CELLS - filled)
+        line.append(f"  {gauge} {countdown}s", style=theme.bad if countdown <= 5 else theme.dim)
+    return line
+
+
+def _keybar(theme: Theme) -> Text:
+    return Text("Ctrl-C 退出", style=theme.dim)

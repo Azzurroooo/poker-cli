@@ -26,8 +26,9 @@ from rpoker.net.messages import (
     State,
     Welcome,
 )
-from rpoker.ui.prompts import FrameView, Option, Terminal
-from rpoker.ui.render import render
+from rpoker.ui.prompts import Option, Terminal
+from rpoker.ui.render import FrameContext
+from rpoker.ui.screen import GameScreen
 from rpoker.ui.tokens import THEMES, Theme
 
 
@@ -56,6 +57,7 @@ class Room:
         self.port = 0
         self.events: asyncio.Queue[str] = asyncio.Queue()
         self._lobby = False
+        self._screen: GameScreen | None = None
         self._adv_task: asyncio.Task | None = None
         self._server: asyncio.Server | None = None
 
@@ -133,7 +135,9 @@ class Room:
         await self._say(f"系统：{conn.name} 离开了房间")
 
     async def _say(self, line: str) -> None:
-        if self._lobby:
+        if self._screen is not None:
+            self._screen.add_chat(line)
+        elif self._lobby:
             self.events.put_nowait(line)
         else:
             print(line)
@@ -214,11 +218,23 @@ class Room:
                       act_seconds=self.settings.act_seconds)
         console = self.terminal.console
         console.clear()
-        with self.terminal.frame_view() as frames:
+        screen = GameScreen(
+            self.terminal,
+            FrameContext(self.theme, self.room_name, self.settings.nickname, self.settings.blinds),
+            self.settings.act_seconds,
+        )
+        self._screen = screen
+        await screen.start()
+        try:
+            actors: dict[int, object] = {0: screen.actor()}
+            for i, name in enumerate(names[1:], 1):
+                if name.endswith("（bot）"):
+                    actors[i] = BotActor(rng)
+                else:
+                    actors[i] = self._remote_actor(next(c for c in self.conns if c.seat == i))
 
             async def broadcast(t: Table, result=None) -> None:
-                frames.update(render(t.seat_view(0), self.theme, result=result, title=self.room_name,
-                                     viewer=self.settings.nickname))
+                await screen.show(t.seat_view(0), result)
                 for conn in list(self.conns):
                     if not conn.alive:
                         continue
@@ -230,42 +246,19 @@ class Room:
                     except (ConnectionError, OSError):
                         conn.alive = False
 
-            actors: dict[int, object] = {}
-            for i, name in enumerate(names):
-                if i == 0:
-                    actors[i] = self._local_human(frames)
-                elif name.endswith("（bot）"):
-                    actors[i] = BotActor(rng)
-                else:
-                    actors[i] = self._remote_actor(next(c for c in self.conns if c.seat == i))
-
             async def publish_result(t: Table) -> None:
                 await broadcast(t, t.hand_result)
 
+            options = [Option("下一手"), Option("结束牌局并显示排名")]
             while not table.finished:
                 await play_hand(table, actors, broadcast, publish_result)
-                frames.pause()
-                try:
-                    choice = await self.terminal.menu("本手结束", [Option("下一手"), Option("结束牌局并显示排名")],
-                                                      cancellable=False)
-                finally:
-                    frames.resume()
-                    console.clear()
-                    frames.update(render(table.seat_view(0), self.theme, title=self.room_name,
-                                         viewer=self.settings.nickname))
+                choice = await screen.interlude(table.hand_result, "本手结束", options)
                 if choice != 0:
                     break
+        finally:
+            self._screen = None
+            await screen.close()
         self._standings(table)
-
-    def _local_human(self, frames: FrameView):
-        async def actor(view):
-            frames.pause()
-            try:
-                return await self.terminal.action(view, self.theme, send_chat=self._say)
-            finally:
-                frames.resume()
-
-        return actor
 
     def _remote_actor(self, conn: _Conn):
         async def actor(view):

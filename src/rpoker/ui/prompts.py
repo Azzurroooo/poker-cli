@@ -4,23 +4,16 @@ import asyncio
 import io
 import sys
 import threading
-import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Self
 
 from prompt_toolkit.input import create_input
 from prompt_toolkit.keys import Keys
 from rich.console import Console
 from rich.live import Live
-from rich.text import Text
-
-from rpoker.domain.actions import Action, LegalActions
-from rpoker.domain.views import SeatView
-from rpoker.ui.tokens import Theme
 
 _KEY_NAMES = {
     Keys.Up: "up", Keys.Down: "down", Keys.Left: "left", Keys.Right: "right",
+    Keys.ShiftLeft: "shift-left", Keys.ShiftRight: "shift-right",
     Keys.Enter: "enter", Keys.Escape: "escape", Keys.Tab: "tab",
     Keys.ControlC: "ctrl-c", Keys.Backspace: "backspace",
 }
@@ -97,36 +90,52 @@ class Option:
 
 
 class FrameView:
-    """Live in-place refresh on a TTY; static reprint on pipes (rich Live never refreshes pipes)."""
+    """Alternate-screen single frame on a TTY (refresh only when content changes);
+    plain reprint on pipes where rich Live never refreshes."""
 
     def __init__(self, terminal: Terminal) -> None:
         self._console = terminal.console
         self._tty = terminal.tty
         self._live: Live | None = None
+        self._last: str | None = None
 
-    def __enter__(self) -> Self:
-        if self._tty:
-            self._live = Live(console=self._console, refresh_per_second=4, transient=False)
+    @property
+    def active(self) -> bool:
+        return self._live is not None
+
+    def start(self) -> None:
+        if self._tty and self._live is None:
+            self._live = Live(console=self._console, screen=True, auto_refresh=False, transient=False)
             self._live.start()
-        return self
 
-    def __exit__(self, *exc) -> None:
+    def stop(self) -> None:
         if self._live is not None:
             self._live.stop()
+            self._live = None
+        self._last = None
 
     def update(self, renderable) -> None:
-        if self._live is not None:
-            self._live.update(renderable)
-        else:
+        if self._live is None:
             self._console.print(renderable)
+            return
+        text = self._ansi(renderable)
+        if text == self._last:
+            return
+        self._last = text
+        self._live.update(renderable, refresh=True)
 
-    def pause(self) -> None:
-        if self._live is not None:
-            self._live.stop()
-
-    def resume(self) -> None:
-        if self._live is not None:
-            self._live.start()
+    def _ansi(self, renderable) -> str:
+        buffer = io.StringIO()
+        offscreen = Console(
+            file=buffer,
+            force_terminal=True,
+            color_system=self._console.color_system or "truecolor",
+            width=self._console.width,
+            highlight=False,
+            legacy_windows=False,
+        )
+        offscreen.print(renderable)
+        return buffer.getvalue()
 
 
 class Terminal:
@@ -295,155 +304,3 @@ class Terminal:
                 case digit if digit.isdigit() and 1 <= int(digit) <= len(options):
                     self._erase_above(height)
                     return int(digit) - 1
-
-    async def action(self, view: SeatView, theme: Theme, send_chat: Callable[[str], Awaitable[None]] | None = None) -> Action:
-        legal: LegalActions = view.legal
-        if not self.tty:
-            self.print()
-            self.print(self._action_line(legal, theme))
-            while True:
-                answer = await self.key(None)
-                if answer is None:
-                    return self._auto(legal)
-                action = self._parse_action(answer, legal)
-                if action is not None:
-                    return action
-                self.print("[dim]无效输入[/dim]" + self._action_line(legal, theme))
-        ctrl_seen = False
-        while True:
-            key = await self._action_bar(legal, theme, view)
-            if key is None:
-                return self._auto(legal)
-            ctrl_seen = key == "ctrl-c" and not ctrl_seen
-            match key:
-                case "f":
-                    return Action("fold")
-                case "c":
-                    return Action("check") if legal.can_check else Action("call")
-                case "a" if not legal.can_check:
-                    return Action("allin")
-                case "r" if legal.max_raise_to is not None:
-                    amount = await self._raise_page(legal, theme, view)
-                    if amount is not None:
-                        return Action("raise", amount)
-                case "m" if send_chat is not None:
-                    text = await self.ask("聊天：")
-                    if text:
-                        await send_chat(text)
-                case "ctrl-c":
-                    if await self.confirm("确定退出 poker-cli？", default=False):
-                        raise QuitApp
-                    ctrl_seen = False
-
-    def _action_line(self, legal: LegalActions, theme: Theme) -> str:
-        parts = []
-        if legal.to_call > 0:
-            parts.append("f=弃牌")
-            parts.append(f"c=跟注 {legal.to_call}")
-            parts.append("a=全下")
-        else:
-            parts.append("c=过牌")
-        if legal.max_raise_to is not None:
-            parts.append(f"r=加注 {legal.min_raise_to}-{legal.max_raise_to}")
-        return "  ".join(parts) + "  （如 r120 表示加注至 120）"
-
-    def _parse_action(self, answer: str, legal: LegalActions) -> Action | None:
-        if answer == "f":
-            return Action("fold")
-        if answer == "c":
-            return Action("check") if legal.can_check else Action("call")
-        if answer == "a":
-            return Action("allin")
-        if answer.startswith("r") and legal.max_raise_to is not None and answer[1:].isdigit():
-            amount = int(answer[1:])
-            if legal.min_raise_to <= amount <= legal.max_raise_to:
-                return Action("raise", amount)
-        return None
-
-    def _auto(self, legal: LegalActions) -> Action:
-        return Action("check") if legal.can_check else Action("fold")
-
-    async def _action_bar(self, legal: LegalActions, theme: Theme, view: SeatView) -> str | None:
-        buttons: list[tuple[str, str]] = []
-        if legal.to_call > 0:
-            buttons.append(("F", "弃牌"))
-            buttons.append(("C", f"跟注 {legal.to_call}"))
-        else:
-            buttons.append(("C", "过牌"))
-        if legal.max_raise_to is not None:
-            buttons.append(("R", "加注"))
-        if not legal.can_check:
-            buttons.append(("A", "全下"))
-        shown: str | None = None
-        try:
-            while True:
-                bar = Text()
-                for i, (hotkey, label) in enumerate(buttons):
-                    if i:
-                        bar.append(" ")
-                    bar.append(f"[{hotkey}]", style=theme.accent)
-                    bar.append(f" {label}", style=theme.fg)
-                bar.append("  M 聊天", style=theme.dim)
-                if view.deadline is not None:
-                    remaining = max(int(view.deadline - time.monotonic()), 0)
-                    gauge = "█" * min(remaining // 3, 10) + "░" * max(10 - remaining // 3, 0)
-                    bar.append(f" {gauge} {remaining}s", style=theme.bad if remaining <= 5 else theme.dim)
-                if bar.plain != shown:
-                    self._redraw_line(bar)
-                    shown = bar.plain
-                key = await self.key(0.25)
-                if key is not None:
-                    return key
-        finally:
-            self.show_cursor()
-            self._write("\n")
-
-    async def _raise_page(self, legal: LegalActions, theme: Theme, view: SeatView) -> int | None:
-        step = max(view.pot_total // 20, 1)
-        amount = legal.min_raise_to
-        presets = [
-            ("1", "最小", legal.min_raise_to),
-            ("2", "半池", min(max(legal.to_call + view.pot_total // 2, legal.min_raise_to), legal.max_raise_to)),
-            ("3", "满池", min(max(legal.to_call + view.pot_total, legal.min_raise_to), legal.max_raise_to)),
-            ("4", "全下", legal.max_raise_to),
-        ]
-        if not self.tty:
-            while True:
-                answer = await self.key(None)
-                if answer is None or answer in ("q", "escape"):
-                    return None
-                action = self._parse_action("r" + answer, legal)
-                if action is not None:
-                    return action.amount
-        while True:
-            span = max(legal.max_raise_to - legal.min_raise_to, 1)
-            filled = round((amount - legal.min_raise_to) / span * 20)
-            slider = "━" * filled + "●" + "━" * (20 - filled)
-            line = Text()
-            line.append("加注至 ", style=theme.fg)
-            line.append(f"{amount:,}", style=theme.gold)
-            line.append(f"  ←{slider}→  ", style=theme.dim)
-            line.append(f"{legal.max_raise_to:,}", style=theme.dim)
-            self.print(line)
-            hint = Text(style=theme.dim)
-            hint.append("   ".join(f"[{k}] {label} {value:,}" for k, label, value in presets))
-            hint.append("   Enter 确认 · Esc 取消")
-            self.print(hint)
-            key = await self.key(None)
-            self._erase_above(2)
-            match key:
-                case "left":
-                    amount = max(legal.min_raise_to, amount - step)
-                case "right":
-                    amount = min(legal.max_raise_to, amount + step)
-                case "1" | "2" | "3" | "4":
-                    amount = {k: v for k, _, v in presets}[key]
-                case "enter":
-                    return amount
-                case "escape" | "q":
-                    return None
-                case "ctrl-c":
-                    return None
-                case digit if digit.isdigit() and 1 <= int(digit) <= 9:
-                    scaled = legal.min_raise_to + span * int(digit) // 10
-                    amount = min(max(scaled, legal.min_raise_to), legal.max_raise_to)
