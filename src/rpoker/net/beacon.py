@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 BEACON_PORT = 45692
 ADV_INTERVAL = 3.0
-_APP_TAG = "realpoker"
+_APP_TAG = "poker-cli"
 
 
 @dataclass(frozen=True, slots=True)

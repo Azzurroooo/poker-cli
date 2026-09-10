@@ -1,4 +1,4 @@
-# real-poker — 局域网多人德州扑克 CLI 应用 · 设计与实施方案
+# poker-cli — 局域网多人德州扑克 CLI 应用 · 设计与实施方案
 
 > 版本 v1.0 · 2026-09-09
 > 一句话定位：**一条命令启动、零门槛加入、产品级观感的局域网德克萨斯扑克终端应用**。
@@ -15,7 +15,7 @@
 5. **同类同构**：决策源（人类/Bot/远端玩家）共用一个 `Actor` 接口；传输（本地/TCP）共用一个 `Connector` 接口；不出现第二套风格。
 6. **零隐式耦合**：无全局单例、无模块级可变状态。RNG、时钟、UI 全部显式注入。引擎对网络、对 UI 一无所知。
 7. **能用函数不建类**：只有"有不变量的状态"（Table、Deck、Room）才用类；评估器、渲染、协议编解码全是纯函数。
-8. **启动之外无命令**：唯一的 CLI 命令是 `realpoker`。创建房间、发现房间、加入对局、改名、切主题，全部在应用内以菜单完成。
+8. **启动之外无命令**：唯一的 CLI 命令是 `poker-cli`。创建房间、发现房间、加入对局、改名、切主题，全部在应用内以菜单完成。
 
 ---
 
@@ -49,7 +49,7 @@
 | 交互 | **prompt_toolkit** | 方向键菜单、补全、`patch_stdout()`（网络事件打印到输入行上方而不破坏菜单）；原生 asyncio 集成 |
 | 网络 | stdlib `asyncio` + TCP(JSON Lines) + UDP 广播 | 局域网无需 TLS/SSH；零额外依赖 |
 | 环境管理 | **uv** | `uv sync` 一条命令复原完整开发环境（含解释器）；`uv.lock` 保证跨机器依赖一致 |
-| 构建 | `pyproject.toml` + `[project.scripts] realpoker` | `uv build` 产 wheel；`uv tool install` / `pipx install` 即得全局命令 |
+| 构建 | `pyproject.toml` + `[project.scripts] poker-cli` | `uv build` 产 wheel；`uv tool install` / `pipx install` 即得全局命令 |
 | 版本管理 | **git** | 仓库根 `.git`；`main` 常绿 + 短命特性分支；里程碑打 tag |
 | 测试 | pytest | 引擎全确定性可重放 |
 
@@ -59,9 +59,9 @@
 
 **uv 管理 Python 环境与依赖，是唯一的包事务入口**：
 - 仓库自带 `.python-version`（3.11+）与 `uv.lock`；任何新机器 `uv sync` 一步完成解释器安装与依赖复原，无需系统级 Python。
-- 开发期一律 `uv run` 前缀：`uv run realpoker`（运行）、`uv run pytest`（测试）、`uv run ruff check`（Lint）——不手动激活 venv，不存在"环境没激活"类问题。
+- 开发期一律 `uv run` 前缀：`uv run poker-cli`（运行）、`uv run pytest`（测试）、`uv run ruff check`（Lint）——不手动激活 venv，不存在"环境没激活"类问题。
 - 依赖增删只经 `uv add <pkg>` / `uv remove <pkg>`，由 uv 同步 `pyproject.toml` 与 `uv.lock`；禁止手改 lock。`uv.lock` 必须入库，`\.venv/` 必须忽略。
-- 发布：`uv build` 产 wheel，`uv tool install real-poker` 装出全局 `realpoker` 命令。
+- 发布：`uv build` 产 wheel，`uv tool install poker-cli` 装出全局 `poker-cli` 命令。
 
 **git 管理代码仓库**：
 - 项目初始化即 `git init`；`.gitignore` 仅四类：`.venv/`、`__pycache__/`、`dist/`、`.pytest_cache/`（其余一概入库，含 `uv.lock`）。
@@ -91,7 +91,7 @@
 ### 3.1 目录结构（src 布局，文件即边界）
 
 ```
-real-poker/                ← git 仓库根（git init 于此）
+poker-cli/                ← git 仓库根（git init 于此）
 ├── .gitignore             ← 仅 .venv/ __pycache__/ dist/ .pytest_cache/
 ├── .python-version        ← 3.11+，uv 识别
 ├── pyproject.toml
@@ -119,7 +119,7 @@ real-poker/                ← git 仓库根（git init 于此）
 │   │   ├── table_view.py   # SeatView → rich 可渲染对象的纯函数
 │   │   └── prompts.py      # 菜单/行动条/金额滑条（prompt_toolkit）
 │   └── app/
-│       ├── main.py         # realpoker 入口
+│       ├── main.py         # poker-cli 入口
 │       ├── lobby.py        # 主菜单·房间发现·创建向导·昵称
 │       ├── room.py         # 房主：等待区→开局循环→结算
 │       ├── table_loop.py   # 双端共用：驱动 Actor/Connector 的手牌循环
@@ -256,7 +256,7 @@ class Table:
 - 房主每 **3 秒**向 `255.255.255.255:<BEACON_PORT>`（固定 45692，IANA 动态段）广播一帧 JSON：
 
 ```json
-{"app":"realpoker","v":1,"room":"Alice 的牌局","seats":2,"max":9,
+{"app":"poker-cli","v":1,"room":"Alice 的牌局","seats":2,"max":9,
  "in_hand":false,"tcp_port":45691,"host":"ALICE-PC"}
 ```
 
@@ -377,7 +377,7 @@ class Table:
 ### 7.6 大厅与房间（"零命令"承诺的落点）
 
 ```
-启动 realpoker → 首次: 请求昵称(默认 $USERNAME, 回车即用, 存 config.json)
+启动 poker-cli → 首次: 请求昵称(默认 $USERNAME, 回车即用, 存 config.json)
 
 主菜单:  ▶ 创建房间（房主）    加入房间（自动发现）    本地练习（对 bot）    退出
 创建向导: 房名[默认"<昵称>的牌局"] → 盲注[5/10] → 起始筹码[1000] → 人数上限[9]
@@ -387,7 +387,7 @@ class Table:
 加入页:   自动扫描 3s → 房间列表(房名/人数/是否对局中) → 选择 → 连接 → 等待房主开始
 ```
 
-- 昵称/主题/上次的房间配置全部持久化到 `~/.config/realpoker/config.json`（stdlib json；Windows 实际路径用 `platform` 无关的 `Path.home()` 拼接，经 `os.environ.get("APPDATA")` 优先）。
+- 昵称/主题/上次的房间配置全部持久化到 `~/.config/poker-cli/config.json`（stdlib json；Windows 实际路径用 `platform` 无关的 `Path.home()` 拼接，经 `os.environ.get("APPDATA")` 优先）。
 - **首启自检**：stdout 编码非 UTF-8（Windows GBK 控制台）→ 顶部横幅提示 `chcp 65001` 或改用 Windows Terminal，不阻断运行。这是 win32 环境的现实风险，必须内置检测。
 
 ---
@@ -485,7 +485,7 @@ async def run_hand(table: Table, actors: dict[int, Actor], publish: Callable[[in
 - **engine**：盲注/heads-up/加注重开/短 all-in/边池/余数/run out/弃牌独赢各一组；`test_replay`：同一 seed 整局事件流逐帧断言；每局终局断言筹码守恒。
 - **net**：codec 往返一致性、畸形帧 → ProtocolError、beacon 编解码。
 - **ui**：`SeatView` 固定样本 → 渲染字符串剥 ANSI 后快照断言。
-- **手工验收清单**：两台真机（一台 win32）从 `realpoker` 启动到分出胜负全程零命令；断电客机后牌局继续；30s 超时自动过牌；9 人满员布局无折行；16 色终端不花屏。
+- **手工验收清单**：两台真机（一台 win32）从 `poker-cli` 启动到分出胜负全程零命令；断电客机后牌局继续；30s 超时自动过牌；9 人满员布局无折行；16 色终端不花屏。
 
 ## 13. 里程碑（每步可独立验收）
 

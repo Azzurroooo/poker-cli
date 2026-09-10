@@ -18,7 +18,7 @@ class Settings:
     @staticmethod
     def path() -> Path:
         base = os.environ.get("APPDATA") or str(Path.home() / ".config")
-        return Path(base) / "realpoker" / "config.json"
+        return Path(base) / "poker-cli" / "config.json"
 
     @classmethod
     def load(cls) -> Settings:

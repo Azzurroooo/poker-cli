@@ -331,7 +331,7 @@ class Terminal:
                     if text:
                         await send_chat(text)
                 case "ctrl-c":
-                    if await self.confirm("确定退出 realpoker？", default=False):
+                    if await self.confirm("确定退出 poker-cli？", default=False):
                         raise QuitApp
                     ctrl_seen = False
 

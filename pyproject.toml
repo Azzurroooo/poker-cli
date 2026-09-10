@@ -1,5 +1,5 @@
 [project]
-name = "real-poker"
+name = "poker-cli"
 version = "0.1.0"
 description = "LAN multiplayer Texas Hold'em for the terminal"
 requires-python = ">=3.11"
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-realpoker = "rpoker.app.main:main"
+poker-cli = "rpoker.app.main:main"
 
 [dependency-groups]
 dev = [
