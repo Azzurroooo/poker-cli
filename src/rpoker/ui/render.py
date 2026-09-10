@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table as RichTable
 from rich.text import Text
 
-from rpoker.domain.cards import find_best_hand
+from rpoker.domain.cards import find_best_hand, rank_label
 from rpoker.domain.views import SeatInfo, SeatView, Street
 from rpoker.engine.table import HandResult
-from rpoker.ui.cards_art import big_card_lines, cards_row
+from rpoker.ui.cards import card_text, suit_style
 from rpoker.ui.tokens import Theme
 
 STREET_LABELS = {
@@ -68,9 +70,22 @@ def _seats_block(view: SeatView, viewer: str | None, theme: Theme) -> RichTable:
 def _board(view: SeatView, theme: Theme) -> Text:
     slots = _COMMUNITY_SLOTS[view.street]
     shown: list = list(view.community) + [None] * (slots - len(view.community))
-    row = cards_row(shown, theme)
+    row = Text()
+    for i, card in enumerate(shown):
+        if i:
+            row.append(" ")
+        row += card_text(card, theme)
     row.append(f"   底池 {_fmt(view.pot_total)}", style=theme.gold)
     return row
+
+
+def _hero_cards(hole: Sequence, theme: Theme) -> Text:
+    line = Text()
+    for i, card in enumerate(hole):
+        if i:
+            line.append("  ")
+        line.append(f" {rank_label(card.rank)}{card.suit} ", style=f"bold {suit_style(card, theme)}")
+    return line
 
 
 def _log_block(view: SeatView, theme: Theme) -> Text:
@@ -114,7 +129,7 @@ def render(view: SeatView, theme: Theme, result: HandResult | None = None, title
     if view.hole:
         parts.append(Text())
         parts.append(Text("你的手牌", style=theme.dim))
-        parts.extend(big_card_lines(view.hole, theme))
+        parts.append(_hero_cards(view.hole, theme))
         if len(view.community) >= 3:
             parts.append(Text(find_best_hand((*view.hole, *view.community)).label(), style=theme.dim))
     parts.append(Text())

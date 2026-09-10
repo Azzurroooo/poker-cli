@@ -7,7 +7,7 @@ from rpoker.domain.views import SeatView
 from rpoker.net.connector import connect
 from rpoker.net.messages import Act, Chat, Error, Hello, Result, State, Welcome
 from rpoker.ui.prompts import Terminal
-from rpoker.ui.table_view import render
+from rpoker.ui.render import render
 from rpoker.ui.tokens import THEMES
 
 ERROR_TEXTS = {

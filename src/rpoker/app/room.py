@@ -27,7 +27,7 @@ from rpoker.net.messages import (
     Welcome,
 )
 from rpoker.ui.prompts import FrameView, Option, Terminal
-from rpoker.ui.table_view import render
+from rpoker.ui.render import render
 from rpoker.ui.tokens import THEMES, Theme
 
 

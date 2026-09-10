@@ -6,7 +6,7 @@ from rpoker.actors.bot import BOT_NAMES, BotActor
 from rpoker.app.table_loop import play_hand
 from rpoker.engine.table import Table
 from rpoker.ui.prompts import FrameView, Option, Terminal
-from rpoker.ui.table_view import render
+from rpoker.ui.render import render
 from rpoker.ui.tokens import THEMES, Theme
 
 

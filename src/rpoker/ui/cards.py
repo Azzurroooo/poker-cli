@@ -38,7 +38,7 @@ _SHADE = "░▒▓█▓▒"
 def card_text(card: Card | None, theme: Theme, state: str = NORMAL) -> Text:
     if card is None:
         return Text("[▓▓]", style=theme.dim)
-    return Text(f"[{rank_label(card.rank)}{card.suit}]", style=_text_style(card, theme, state))
+    return Text(f"[{rank_label(card.rank)}{card.suit}]", style=suit_style(card, theme, state))
 
 
 def cards_row(cards: Sequence[Card | None], theme: Theme) -> Text:
@@ -56,7 +56,7 @@ def card_lines(card: Card | None, size: tuple[int, int], theme: Theme, state: st
     if card is None or state == HIDDEN:
         style, body = theme.dim, _shade_rows(inner, height - 2)
     else:
-        style = _text_style(card, theme, state)
+        style = suit_style(card, theme, state)
         body = _face_rows(card, inner, height - 2)
     top = Text("╭" + "─" * inner + "╮", style=style)
     bottom = Text("╰" + "─" * inner + "╯", style=style)
@@ -68,7 +68,7 @@ def parse_card(text: str) -> Card:
     return Card(rank, Suit(text[-1]))
 
 
-def _text_style(card: Card, theme: Theme, state: str) -> str:
+def suit_style(card: Card, theme: Theme, state: str = NORMAL) -> str:
     if state == WINNING:
         return theme.gold
     if state == DIM:
