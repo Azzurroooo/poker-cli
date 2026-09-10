@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import sys
 import threading
 import time
@@ -134,11 +135,13 @@ class Terminal:
         self.tty = sys.stdin.isatty() and console.is_terminal
         self._keys: KeyReader | None = None
         self._lines: LineReader | None = None
+        self._cursor_hidden = False
 
     def frame_view(self) -> FrameView:
         return FrameView(self)
 
     def close(self) -> None:
+        self.show_cursor()
         if self._keys is not None:
             self._keys.close()
 
@@ -155,18 +158,48 @@ class Terminal:
         return await self._reader().get(timeout)
 
     def print(self, *renderables) -> None:
+        self.show_cursor()
         self.console.print(*renderables)
 
     def _write(self, text: str) -> None:
         self.console.file.write(text)
         self.console.file.flush()
 
+    def hide_cursor(self) -> None:
+        if self.tty and not self._cursor_hidden:
+            self._write("\x1b[?25l")
+            self._cursor_hidden = True
+
+    def show_cursor(self) -> None:
+        if self._cursor_hidden:
+            self._write("\x1b[?25h")
+            self._cursor_hidden = False
+
     def _erase_above(self, lines: int) -> None:
+        self.show_cursor()
         self._write(f"\x1b[{lines}A\x1b[J")
 
     def _redraw_line(self, renderable) -> None:
-        self._write("\r\x1b[2K")
-        self.console.print(renderable, end="")
+        """Atomic in-place line refresh: one write, no wrap, no blank frame, cursor hidden."""
+        if not self.tty:
+            self.console.print(renderable)
+            return
+        self.hide_cursor()
+        self._write("\r" + self._ansi_line(renderable) + "\x1b[K")
+
+    def _ansi_line(self, renderable) -> str:
+        """Render to a single ANSI string, hard-cropped to terminal width so it never wraps."""
+        buffer = io.StringIO()
+        offscreen = Console(
+            file=buffer,
+            force_terminal=True,
+            color_system=self.console.color_system or "truecolor",
+            width=self.console.width,
+            highlight=False,
+            legacy_windows=False,
+        )
+        offscreen.print(renderable)
+        return buffer.getvalue().split("\n", 1)[0]
 
     async def ask(self, prompt: str, default: str = "") -> str:
         self.console.print(prompt + (f" [dim]（回车 = {default}）[/dim]" if default else ""))
@@ -342,25 +375,28 @@ class Terminal:
         if not legal.can_check:
             buttons.append(("A", "全下"))
         shown: str | None = None
-        while True:
-            bar = Text()
-            for i, (hotkey, label) in enumerate(buttons):
-                if i:
-                    bar.append("  ")
-                bar.append(f"[{hotkey}] ", style=theme.accent)
-                bar.append(label, style=theme.fg)
-            bar.append("   M 聊天", style=theme.dim)
-            if view.deadline is not None:
-                remaining = max(int(view.deadline - time.monotonic()), 0)
-                gauge = "█" * min(remaining // 3, 10) + "░" * max(10 - remaining // 3, 0)
-                bar.append(f"   ⏱ {gauge} {remaining}s", style=theme.bad if remaining <= 5 else theme.dim)
-            if bar.plain != shown:
-                self._redraw_line(bar)
-                shown = bar.plain
-            key = await self.key(0.25)
-            if key is not None:
-                self._write("\n")
-                return key
+        try:
+            while True:
+                bar = Text()
+                for i, (hotkey, label) in enumerate(buttons):
+                    if i:
+                        bar.append(" ")
+                    bar.append(f"[{hotkey}]", style=theme.accent)
+                    bar.append(f" {label}", style=theme.fg)
+                bar.append("  M 聊天", style=theme.dim)
+                if view.deadline is not None:
+                    remaining = max(int(view.deadline - time.monotonic()), 0)
+                    gauge = "█" * min(remaining // 3, 10) + "░" * max(10 - remaining // 3, 0)
+                    bar.append(f" ⏱{gauge} {remaining}s", style=theme.bad if remaining <= 5 else theme.dim)
+                if bar.plain != shown:
+                    self._redraw_line(bar)
+                    shown = bar.plain
+                key = await self.key(0.25)
+                if key is not None:
+                    return key
+        finally:
+            self.show_cursor()
+            self._write("\n")
 
     async def _raise_page(self, legal: LegalActions, theme: Theme, view: SeatView) -> int | None:
         step = max(view.pot_total // 20, 1)
