@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rpoker.domain.views import SeatView
 from rpoker.net.connector import connect
-from rpoker.net.messages import Act, Error, Hello, Result, State, Welcome
+from rpoker.net.messages import Act, Chat, Error, Hello, Result, State, Welcome
 from rpoker.ui.prompts import Terminal
 from rpoker.ui.render import FrameContext
 from rpoker.ui.screen import GameScreen
@@ -32,17 +32,30 @@ async def join_room(terminal: Terminal, settings, ip: str, port: int) -> None:
         return
     assigned = reply.names[reply.seat] or settings.nickname
     terminal.print(f"已加入「{reply.room}」（座位 {reply.seat + 1}/{len(reply.names)}，昵称 {assigned}），等待房主开始牌局…")
-    await _game(terminal, connector, welcome=reply, display=assigned, theme=theme)
+
+    async def chat_send(text: str) -> None:
+        await connector.send(Chat(text))
+
+    def save_display(value: str) -> None:
+        settings.display = value
+        settings.save()
+
+    await _game(terminal, connector, welcome=reply, display=assigned, theme=theme,
+                user_display=settings.display, chat_send=chat_send, save_display=save_display)
     terminal.print("[yellow]已与房间断开。[/yellow]")
 
 
-async def _game(terminal: Terminal, connector, welcome: Welcome, display: str, theme) -> None:
+async def _game(terminal: Terminal, connector, welcome: Welcome, display: str, theme,
+                user_display: str, chat_send, save_display) -> None:
     console = terminal.console
     console.clear()
     screen = GameScreen(
         terminal,
         FrameContext(theme, welcome.room, display, (welcome.blinds[0], welcome.blinds[1])),
         welcome.act_seconds,
+        display=user_display,
+        chat_send=chat_send,
+        on_display_change=save_display,
     )
     await screen.start()
     closed = False

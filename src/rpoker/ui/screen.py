@@ -12,6 +12,7 @@ from rpoker.ui.panels import ActionPanel, action_line, auto_action, parse_action
 from rpoker.ui.prompts import Option, QuitApp, Terminal
 from rpoker.ui.render import (
     FrameContext,
+    OverlayState,
     UiState,
     interlude_summary,
     rich_frame,
@@ -19,16 +20,28 @@ from rpoker.ui.render import (
 )
 
 _POLL_SECONDS = 0.25
+_NOTICE_SECONDS = 3.0
+DISPLAY_LABELS = {"rich": "丰富", "simple": "简单"}
 
 
 class GameScreen:
     """Single-frame game UI: owns UI state, the only key router, and frame refresh."""
 
-    def __init__(self, terminal: Terminal, ctx: FrameContext, act_seconds: float, display: str = "rich") -> None:
+    def __init__(
+        self,
+        terminal: Terminal,
+        ctx: FrameContext,
+        act_seconds: float,
+        display: str = "rich",
+        chat_send: Callable[[str], Awaitable[None]] | None = None,
+        on_display_change: Callable[[str], None] | None = None,
+    ) -> None:
         self.terminal = terminal
         self.ctx = ctx
         self.act_seconds = act_seconds
         self.display = display
+        self.chat_send = chat_send
+        self.on_display_change = on_display_change
         self.frames = terminal.frame_view()
         self._view: SeatView | None = None
         self._result: HandResult | None = None
@@ -38,6 +51,10 @@ class GameScreen:
         self._confirm_quit = False
         self._quit = False
         self._belled = False
+        self._overlay: OverlayState | None = None
+        self._draft: str | None = None
+        self._notice: str | None = None
+        self._notice_until = 0.0
         self._keys: asyncio.Queue[str] = asyncio.Queue()
         self._router: asyncio.Task | None = None
 
@@ -132,10 +149,75 @@ class GameScreen:
                     self._confirm_quit = False
                     self._refresh()
                 continue
-            if key is None:
+            if self._overlay is not None:
+                self._overlay_key(key)
                 continue
-            if self._panel is not None:
-                self._keys.put_nowait(key)
+            if self._draft is not None:
+                await self._draft_key(key)
+                continue
+            if key is None:
+                self._expire_notice()
+                continue
+            match key:
+                case "v":
+                    self._switch_display()
+                case "l":
+                    self._overlay = OverlayState("history", 0)
+                    self._refresh()
+                case "?":
+                    self._overlay = OverlayState("help", 0)
+                    self._refresh()
+                case "m" if self.chat_send is not None:
+                    self._draft = ""
+                    self._refresh()
+                case _:
+                    if self._panel is not None:
+                        self._keys.put_nowait(key)
+
+    def _overlay_key(self, key: str) -> None:
+        if key in ("escape", "q", "?", "l"):
+            self._overlay = None
+        elif key == "up" and self._overlay is not None:
+            self._overlay = OverlayState(self._overlay.kind, self._overlay.scroll + 1)
+        elif key == "down" and self._overlay is not None and self._overlay.scroll > 0:
+            self._overlay = OverlayState(self._overlay.kind, self._overlay.scroll - 1)
+        else:
+            return
+        self._refresh()
+
+    async def _draft_key(self, key: str) -> None:
+        if key == "enter":
+            text, self._draft = self._draft, None
+            if text and self.chat_send is not None:
+                await self.chat_send(text)
+        elif key == "escape":
+            self._draft = None
+        elif key == "backspace":
+            self._draft = self._draft[:-1]
+        elif key == "ctrl-c":
+            self._confirm_quit = True
+            self._draft = None
+        elif len(key) == 1:
+            self._draft += key
+        else:
+            return
+        self._refresh()
+
+    def _switch_display(self) -> None:
+        self.display = "simple" if self.display == "rich" else "rich"
+        if self.on_display_change is not None:
+            self.on_display_change(self.display)
+        self._notify(f"已切换为{DISPLAY_LABELS[self.display]}模式")
+        self._refresh()
+
+    def _notify(self, text: str) -> None:
+        self._notice = text
+        self._notice_until = time.monotonic() + _NOTICE_SECONDS
+
+    def _expire_notice(self) -> None:
+        if self._notice is not None and time.monotonic() >= self._notice_until:
+            self._notice = None
+            self._refresh()
 
     def _set_countdown(self, deadline: float) -> None:
         self._countdown = max(int(deadline - time.monotonic()), 0)
@@ -151,12 +233,15 @@ class GameScreen:
             countdown=self._countdown,
             confirm_quit=self._confirm_quit,
             chat=tuple(self._chat),
+            notice=self._notice,
+            overlay=self._overlay,
+            draft=self._draft,
         )
         console = self.terminal.console
         if self.frames.active and effective_mode(self.display, console.width, console.height) is Mode.RICH:
             self.frames.update(rich_frame(self._view, ui, self.ctx, console.width, console.height))
         else:
-            self.frames.update(simple_frame(self._view, ui, self.ctx))
+            self.frames.update(simple_frame(self._view, ui, self.ctx, console.width))
 
     def _router_pause(self) -> None:
         if self._router is not None:

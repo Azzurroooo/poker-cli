@@ -10,6 +10,7 @@ from pathlib import Path
 class Settings:
     nickname: str = ""
     theme: str = "onedark"
+    display: str = "rich"
     blinds: tuple[int, int] = (5, 10)
     starting_stack: int = 1000
     table_size: int = 5

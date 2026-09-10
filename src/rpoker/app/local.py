@@ -22,6 +22,8 @@ async def run_local(terminal: Terminal, nickname: str, settings) -> None:
         terminal,
         FrameContext(theme, "本地练习", nickname, settings.blinds),
         settings.act_seconds,
+        display=settings.display,
+        on_display_change=_save_display(settings),
     )
     await screen.start()
     try:
@@ -42,6 +44,14 @@ async def run_local(terminal: Terminal, nickname: str, settings) -> None:
         await screen.close()
     if table.finished:
         console.print("牌桌结束：只剩一名有筹码的玩家。", style=theme.gold)
+
+
+def _save_display(settings):
+    def apply(display: str) -> None:
+        settings.display = display
+        settings.save()
+
+    return apply
 
 
 def _result_publisher(broadcast):

@@ -110,9 +110,21 @@ async def _pick_number(terminal: Terminal, title: str, values: list[int], curren
 
 
 async def _settings_menu(terminal: Terminal, settings: Settings) -> None:
-    names = list(THEMES)
-    choice = await terminal.menu("选择主题", [Option(name) for name in names])
-    if choice is not None:
-        settings.theme = names[choice]
-        settings.save()
-        terminal.print(f"主题已切换为 {settings.theme}")
+    choice = await terminal.menu("设置", [Option("主题"), Option("展示形式（丰富 / 简单）")])
+    if choice == 0:
+        names = list(THEMES)
+        theme_choice = await terminal.menu("选择主题", [Option(name) for name in names])
+        if theme_choice is not None:
+            settings.theme = names[theme_choice]
+            settings.save()
+            terminal.print(f"主题已切换为 {settings.theme}")
+    elif choice == 1:
+        modes = [("rich", "丰富（卡牌与座位盒完整呈现）"), ("simple", "简单（紧凑文本，信息不减）")]
+        mode_choice = await terminal.menu(
+            "选择展示形式",
+            [Option(label, hint="（当前）" if settings.display == value else "") for value, label in modes],
+        )
+        if mode_choice is not None:
+            settings.display = modes[mode_choice][0]
+            settings.save()
+            terminal.print(f"展示形式已切换为 {settings.display}")

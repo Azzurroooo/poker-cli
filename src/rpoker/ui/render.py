@@ -1,13 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from rich.align import Align
-from rich.box import ROUNDED
 from rich.cells import cell_len
-from rich.console import Group
 from rich.panel import Panel
-from rich.table import Table as RichTable
 from rich.text import Text
 
 from rpoker.domain.cards import find_best_hand, rank_label
@@ -39,6 +36,8 @@ _COMMUNITY_SLOTS = {Street.PREFLOP: 0, Street.FLOP: 3, Street.TURN: 4, Street.RI
 _LOG_LINES = 4
 _GAUGE_CELLS = 10
 _SLIDER_CELLS = 16
+def _blank() -> Text:
+    return Text(" ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +46,13 @@ class FrameContext:
     title: str
     viewer: str | None
     blinds: tuple[int, int]
+    act_seconds: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayState:
+    kind: str  # "history" | "help"
+    scroll: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,24 +62,50 @@ class UiState:
     confirm_quit: bool = False
     chat: tuple[str, ...] = ()
     notice: str | None = None
+    overlay: OverlayState | None = None
+    draft: str | None = None
 
 
-def simple_frame(view: SeatView, ui: UiState, ctx: FrameContext) -> Group:
+def simple_frame(view: SeatView, ui: UiState, ctx: FrameContext, width: int) -> Text:
     theme = ctx.theme
-    parts: list = [
-        _header(view, ctx),
-        Text(),
-        _seats_block(view, ctx.viewer, theme),
-        Text(),
-        _board(view, theme),
-        Text(),
-        *_hole_block(view, theme),
-        Text(),
-        _log_block(view, ui.chat, theme),
-        _action_slot(view, ui, ctx),
-        _keybar(theme),
+    rows = (len(view.seats) + 1) // 2
+    lines = [
+        _header(view, ui, ctx),
+        _blank(),
+        *_seats_lines(view, ctx, width, rows),
+        _blank(),
+        _board_line(view, theme),
+        _blank(),
+        *_hole_lines(view, theme),
+        _blank(),
+        *_log_lines(view, ui.chat, theme, _LOG_LINES),
+        _action_line_slot(view, ui, ctx),
+        _keybar(ui, theme),
     ]
-    return Group(*parts)
+    return _join(lines, width)
+
+
+def rich_frame(view: SeatView, ui: UiState, ctx: FrameContext, width: int, height: int) -> Text:
+    tier = rich_tier(width, height)
+    budget = rich_budget(tier, len(view.seats))
+    theme = ctx.theme
+    mid_budget = budget.seats + budget.community + budget.hero
+    if ui.overlay is not None:
+        mid = _overlay_lines(view, ui, ctx, mid_budget, width)
+    else:
+        mid = [
+            *_seats_box_lines(view, ui, ctx, tier, width, budget),
+            *_community_lines(view, ctx, tier, width, budget),
+            *_hero_lines(view, ctx, tier, width, budget),
+        ]
+    lines = [
+        _header(view, ui, ctx),
+        *mid,
+        *_log_lines(view, ui.chat, theme, budget.log),
+        *_action_box_lines(view, ui, ctx, budget),
+        _keybar(ui, theme),
+    ]
+    return _join(lines, width)
 
 
 def interlude_summary(result: HandResult, theme: Theme) -> Panel:
@@ -93,16 +125,63 @@ def interlude_summary(result: HandResult, theme: Theme) -> Panel:
     return Panel(body, title="本手结算", border_style=theme.gold)
 
 
+def _join(lines: Sequence[Text], width: int) -> Text:
+    return Text("\n").join(_crop(line, width) for line in lines)
+
+
+def _crop(line: Text, width: int) -> Text:
+    if cell_len(line.plain) <= width:
+        return line
+    keep, used = 0, 0
+    for ch in line.plain:
+        if used + cell_len(ch) > width:
+            break
+        used += cell_len(ch)
+        keep += 1
+    out = Text(line.plain[:keep])
+    for span in line.spans:
+        if span.start < keep:
+            out.span(span.start, min(span.end, keep), span.style)
+    return out
+
+
 def _fmt(n: int) -> str:
     return f"{n:,}"
 
 
-def _header(view: SeatView, ctx: FrameContext) -> Text:
+def _fit(text: str, width: int) -> str:
+    if cell_len(text) <= width:
+        return text
+    return text[:max(width - 1, 0)] + "…"
+
+
+def _pad(line: Text, width: int) -> Text:
+    line.append(" " * max(width - cell_len(line.plain), 0))
+    return line
+
+
+def _center(line: Text, width: int) -> Text:
+    pad = max((width - cell_len(line.plain)) // 2, 0)
+    return Text(" " * pad) + line if pad else line
+
+
+def _header(view: SeatView, ui: UiState, ctx: FrameContext) -> Text:
     header = Text()
     header.append("♠ ♥ ♦ ♣ ", style=ctx.theme.accent)
     header.append(f"{ctx.title} · 第 {_fmt(view.hand_no)} 手 · {STREET_LABELS[view.street]}"
                   f" · 盲注 {ctx.blinds[0]}/{ctx.blinds[1]}", style=ctx.theme.fg)
+    if ui.notice:
+        header.append("  ")
+        header.append(ui.notice, style=ctx.theme.accent)
     return header
+
+
+def _anchor(view: SeatView, ctx: FrameContext) -> int:
+    if ctx.viewer is not None:
+        for info in view.seats:
+            if info.name == ctx.viewer:
+                return info.index
+    return view.button
 
 
 def _seat_cell(info: SeatInfo, view: SeatView, viewer: str | None, theme: Theme) -> Text:
@@ -129,21 +208,257 @@ def _seat_cell(info: SeatInfo, view: SeatView, viewer: str | None, theme: Theme)
     return line
 
 
-def _seats_block(view: SeatView, viewer: str | None, theme: Theme) -> RichTable:
+def _seats_lines(view: SeatView, ctx: FrameContext, width: int, rows: int) -> list[Text]:
     n = len(view.seats)
-    order = [(view.button + 1 + i) % n for i in range(n)]
-    grid = RichTable.grid(padding=(0, 3))
+    order = seat_order(n, _anchor(view, ctx))
+    cells = [_seat_cell(view.seats[i], view, ctx.viewer, ctx.theme) for i in order]
+    lines = []
     for half in range(0, n, 2):
-        row = []
-        for seat_index in order[half:half + 2]:
-            row.append(_seat_cell(view.seats[seat_index], view, viewer, theme))
-        if len(row) == 1:
-            row.append(Text())
-        grid.add_row(*row)
-    return grid
+        pair = cells[half:half + 2]
+        line = Text("   ").join(pair) if len(pair) == 2 else pair[0]
+        lines.append(_pad(line, width))
+    return lines
 
 
-def _board(view: SeatView, theme: Theme) -> Text:
+def _seats_box_lines(view: SeatView, ui: UiState, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
+    theme = ctx.theme
+    n = len(view.seats)
+    order = seat_order(n, _anchor(view, ctx))
+    if n > 6 or tier is Tier.COMPACT:
+        lines = _seats_lines(view, ctx, width, (n + 1) // 2)
+        return [*lines, *[_blank()] * (budget.seats - len(lines))]
+    box_w = seat_box_width([info.name for info in view.seats], width, boxed=True)
+    boxes = [_seat_box(view.seats[i], view, ui, ctx, box_w) for i in order]
+    lines = []
+    for half in range(0, len(boxes), 2):
+        pair = boxes[half:half + 2]
+        if len(pair) == 1:
+            pair = [_blank_box(box_w, theme), pair[0]]
+        for row in range(3):
+            line = Text()
+            for j, box in enumerate(pair):
+                if j:
+                    line.append("  ")
+                line += box[row]
+            lines.append(_pad(line, width))
+    return [*lines, *[_blank()] * (budget.seats - len(lines))]
+
+
+def _seat_box(info: SeatInfo, view: SeatView, ui: UiState, ctx: FrameContext, w: int) -> list[Text]:
+    theme = ctx.theme
+    inner = w - 2
+    is_viewer = ctx.viewer is not None and info.name == ctx.viewer
+    acting = info.index == view.to_act
+    out = info.folded and info.stack == 0 and view.street is not Street.HAND_OVER
+    folded = info.folded and not out
+    body = Text()
+    if is_viewer:
+        body.append(f"{SYMBOLS['hero']} ", style=theme.accent)
+    elif acting:
+        body.append(f"{SYMBOLS['to_act']} ", style=theme.accent)
+    if info.is_button:
+        body.append(f"{SYMBOLS['button']} ", style=theme.gold)
+    if out:
+        body.append(_fit(f"{info.name}（出局）", inner - cell_len(body.plain)), style=theme.dim)
+    else:
+        status = " 全下" if info.allin else " 弃牌" if folded else ""
+        bet = f" 注{info.street_bet}" if info.street_bet > 0 else ""
+        tail = cell_len(_fmt(info.stack)) + cell_len(status) + cell_len(bet) + 2
+        name_style = theme.dim if folded else theme.fg
+        name = _fit(info.name, max(inner - cell_len(body.plain) - tail, 4))
+        body.append(name, style=f"strike {theme.dim}" if folded else name_style)
+        body.append("  ", style=theme.dim)
+        body.append(_fmt(info.stack), style=theme.gold if info.allin else theme.fg)
+        if bet:
+            body.append(bet, style=theme.gold)
+        if status:
+            body.append(status, style=theme.bad if info.allin else theme.dim)
+    border = theme.accent if (acting or is_viewer) else theme.gold if info.allin else theme.dim if (folded or out) else theme.border
+    corner = ("╭", "╮", "╰", "╯") if (acting or is_viewer) else ("┌", "┐", "└", "┘")
+    content = _pad(body, inner)
+    return [
+        Text(f"{corner[0]}{'─' * inner}{corner[1]}", style=border),
+        Text("│", style=border) + content + Text("│", style=border),
+        Text(f"{corner[2]}{'─' * inner}{corner[3]}", style=border),
+    ]
+
+
+def _blank_box(w: int, theme: Theme) -> list[Text]:
+    inner = w - 2
+    return [
+        Text(f"┌{'─' * inner}┐", style=theme.border),
+        Text(f"│{' ' * inner}│", style=theme.border),
+        Text(f"└{'─' * inner}┘", style=theme.border),
+    ]
+
+
+def _community_lines(view: SeatView, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
+    theme = ctx.theme
+    slots = _COMMUNITY_SLOTS[view.street]
+    shown: list = list(view.community) + [None] * (slots - len(view.community))
+    if tier is Tier.COMPACT:
+        ladder = [card_lines(card, MINI, theme) for card in shown]
+        rows = []
+        for row in range(MINI[1]):
+            line = Text()
+            for i, card in enumerate(ladder):
+                if i:
+                    line.append(" ")
+                line += card[row]
+            if row == 1:
+                line.append(f"  底池 {_fmt(view.pot_total)}", style=theme.gold)
+            rows.append(line)
+        return [*rows, *[_blank()] * (budget.community - len(rows))]
+    ladder = [card_lines(card, STANDARD, theme) for card in shown]
+    card_rows = []
+    for row in range(STANDARD[1]):
+        line = Text()
+        for i, card in enumerate(ladder):
+            if i:
+                line.append(" ")
+            line += card[row]
+        card_rows.append(line)
+    box_w = cell_len(card_rows[0].plain) + 2
+    lines = _boxed(card_rows, f"底池 {_fmt(view.pot_total)}", theme.border, box_w)
+    centered = [_center(line, width) for line in lines]
+    return [*centered, *[_blank()] * (budget.community - len(centered))]
+
+
+def _hero_lines(view: SeatView, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
+    theme = ctx.theme
+    if not view.hole:
+        return [_blank()] * budget.hero
+    size = WIDE if tier is Tier.WIDE else STANDARD
+    ladder = [card_lines(card, size, theme) for card in view.hole]
+    rows = []
+    for row in range(size[1]):
+        line = Text()
+        for i, card in enumerate(ladder):
+            if i:
+                line.append("   ")
+            line += card[row]
+        rows.append(_center(line, width))
+    if len(view.community) >= 3:
+        rows.append(_center(Text(find_best_hand((*view.hole, *view.community)).label(), style=theme.dim), width))
+    else:
+        rows.append(_blank())
+    return [*rows, *[_blank()] * (budget.hero - len(rows))]
+
+
+def _log_lines(view: SeatView, chat: tuple[str, ...], theme: Theme, count: int) -> list[Text]:
+    entries = [*view.log, *chat]
+    lines = []
+    for i, entry in enumerate(entries[-count:]):
+        style = theme.fg if i == count - 1 else theme.dim
+        lines.append(Text(_fit(entry, 200), style=style))
+    return [*lines, *[_blank()] * (count - len(lines))]
+
+
+def _action_line_slot(view: SeatView, ui: UiState, ctx: FrameContext) -> Text:
+    theme = ctx.theme
+    if ui.confirm_quit:
+        return Text("再按 Enter / Ctrl-C 确认退出 · Esc 取消", style=theme.bad)
+    if ui.panel is not None:
+        return Text(" ").join(part for part in _panel_rows(ui.panel, ui.countdown, theme) if part.plain)
+    if view.to_act is not None:
+        return Text(f"等待 {view.seats[view.to_act].name} 行动…", style=theme.dim)
+    return _blank()
+
+
+def _action_box_lines(view: SeatView, ui: UiState, ctx: FrameContext, budget: Budget) -> list[Text]:
+    theme = ctx.theme
+    if ui.confirm_quit:
+        rows = [Text("再按 Enter / Ctrl-C 确认退出 · Esc 取消", style=theme.bad), _blank()]
+        title, border = "退出", theme.bad
+    elif ui.panel is not None:
+        rows = _panel_rows(ui.panel, ui.countdown, theme)
+        title, border = "你的行动", theme.accent
+    else:
+        waiting = view.seats[view.to_act].name if view.to_act is not None else ""
+        rows = [Text(f"{SYMBOLS['to_act']} {waiting} 行动中…", style=theme.dim), _blank()]
+        title, border = "等待", theme.border
+    inner = max(cell_len(row.plain) for row in rows) + 4
+    lines = _boxed(rows, title, border, inner)
+    return [*lines, *[_blank()] * (budget.action - len(lines))]
+
+
+def _panel_rows(panel: ActionPanel, countdown: int | None, theme: Theme) -> list[Text]:
+    row1 = Text()
+    if panel.raising:
+        low, high = panel.legal.min_raise_to, panel.legal.max_raise_to
+        span = max(high - low, 1)
+        filled = round((panel.amount - low) / span * _SLIDER_CELLS)
+        row1.append("加注至 ", style=theme.fg)
+        row1.append(f"{panel.amount:,}", style=theme.gold)
+        row1.append(" ◀" + "━" * filled + "●" + "━" * (_SLIDER_CELLS - filled) + "▶ ", style=theme.dim)
+        row1.append(f"{high:,}", style=theme.dim)
+        row2 = Text("←→ 调额 · 1最小 2半池 3满池 4全下 · Enter 确认 · Esc 返回", style=theme.dim)
+    else:
+        for i, item in enumerate(panel.items()):
+            if i:
+                row1.append("  ")
+            if i == panel.selected:
+                row1.append("▸ ", style=theme.accent)
+            row1.append(f"[{item.hotkey}]", style=theme.accent)
+            row1.append(f" {item.label}", style=theme.fg)
+        row2 = Text("↑↓ 选择 · Enter 确认", style=theme.dim)
+    if countdown is not None:
+        filled = min(countdown // 3, _GAUGE_CELLS)
+        gauge = "█" * filled + "░" * (_GAUGE_CELLS - filled)
+        row2.append(f"  {gauge} {countdown}s", style=theme.bad if countdown <= 5 else theme.dim)
+    return [row1, row2]
+
+
+def _keybar(ui: UiState, theme: Theme) -> Text:
+    if ui.draft is not None:
+        line = Text()
+        line.append(f"聊天：{ui.draft}▌", style=theme.fg)
+        line.append("  （Enter 发送 · Esc 取消）", style=theme.dim)
+        return line
+    return Text("V 展示 · L 历史 · ? 帮助 · M 聊天 · Ctrl-C 退出", style=theme.dim)
+
+
+def _overlay_lines(view: SeatView, ui: UiState, ctx: FrameContext, rows: int, width: int) -> list[Text]:
+    theme = ctx.theme
+    overlay = ui.overlay
+    if overlay.kind == "history":
+        title = "历史（本手动作与聊天）"
+        entries = [*view.log, *ui.chat]
+    else:
+        title = "帮助"
+        entries = [
+            "F 弃牌 · C 过牌/跟注 · R 加注 · A 全下",
+            "↑↓ 选动作 · ←→ 调注额（Shift 大步）· 1-4 快捷档位",
+            "Enter 确认 · Esc 返回/关闭",
+            "M 聊天 · V 切换展示形式 · L 历史 · ? 帮助",
+            "Ctrl-C 退出（二次确认）",
+            "",
+            f"盲注 {ctx.blinds[0]}/{ctx.blinds[1]} · 行动限时 {ctx.act_seconds:.0f} 秒",
+        ]
+    avail = max(rows - 2, 1)
+    scroll = min(overlay.scroll, max(0, len(entries) - avail))
+    window = entries[max(0, len(entries) - avail - scroll):len(entries) - scroll] or [""]
+    body = []
+    for i, entry in enumerate(window):
+        style = theme.fg if i == len(window) - 1 else theme.dim
+        body.append(Text(_fit(entry, min(width - 8, 70)), style=style))
+    inner = max(cell_len(row.plain) for row in body) + 2
+    lines = _boxed(body, title, theme.accent, inner)
+    centered = [_center(line, width) for line in lines]
+    return [*centered, *[_blank()] * (rows - len(centered))]
+
+
+def _boxed(body: list[Text], title: str, style: str, inner: int) -> list[Text]:
+    label = f"─ {title} " if title else "─ "
+    fill = max(inner - cell_len(label), 0)
+    lines = [Text(f"╭{label}{'─' * fill}╮", style=style)]
+    for row in body:
+        lines.append(Text("│", style=style) + _pad(row, inner) + Text("│", style=style))
+    lines.append(Text(f"╰{'─' * inner}╯", style=style))
+    return lines
+
+
+def _board_line(view: SeatView, theme: Theme) -> Text:
     slots = _COMMUNITY_SLOTS[view.street]
     shown: list = list(view.community) + [None] * (slots - len(view.community))
     row = Text()
@@ -155,9 +470,9 @@ def _board(view: SeatView, theme: Theme) -> Text:
     return row
 
 
-def _hole_block(view: SeatView, theme: Theme) -> list:
+def _hole_lines(view: SeatView, theme: Theme) -> list[Text]:
     if not view.hole:
-        return [Text(), Text(), Text()]
+        return [_blank(), _blank(), _blank()]
     cards = Text()
     for i, card in enumerate(view.hole):
         if i:
@@ -167,298 +482,5 @@ def _hole_block(view: SeatView, theme: Theme) -> list:
     if len(view.community) >= 3:
         mine = Text(find_best_hand((*view.hole, *view.community)).label(), style=theme.dim)
     else:
-        mine = Text()
+        mine = _blank()
     return [label, cards, mine]
-
-
-def _log_block(view: SeatView, chat: tuple[str, ...], theme: Theme) -> Text:
-    entries = [*view.log, *chat]
-    lines = entries[-_LOG_LINES:]
-    block = Text()
-    for i, entry in enumerate(lines):
-        if i:
-            block.append("\n")
-        style = theme.fg if i == len(lines) - 1 else theme.dim
-        block.append(entry, style=style)
-    return block
-
-
-def _action_slot(view: SeatView, ui: UiState, ctx: FrameContext) -> Text:
-    theme = ctx.theme
-    if ui.confirm_quit:
-        return Text("再按 Enter / Ctrl-C 确认退出 · Esc 取消", style=theme.bad)
-    if ui.panel is not None:
-        return _panel_slot(ui.panel, ui.countdown, theme)
-    if view.to_act is not None:
-        return Text(f"等待 {view.seats[view.to_act].name} 行动…", style=theme.dim)
-    return Text()
-
-
-def _panel_slot(panel: ActionPanel, countdown: int | None, theme: Theme) -> Text:
-    line = Text()
-    if panel.raising:
-        low, high = panel.legal.min_raise_to, panel.legal.max_raise_to
-        span = max(high - low, 1)
-        filled = round((panel.amount - low) / span * _SLIDER_CELLS)
-        line.append("加注至 ", style=theme.fg)
-        line.append(f"{panel.amount:,}", style=theme.gold)
-        line.append(" ◀" + "━" * filled + "●" + "━" * (_SLIDER_CELLS - filled) + "▶ ", style=theme.dim)
-        line.append(f"{high:,}", style=theme.dim)
-        line.append("  1最小 2半池 3满池 4全下 · Enter 确认 · Esc 返回", style=theme.dim)
-    else:
-        for i, item in enumerate(panel.items()):
-            if i:
-                line.append("  ")
-            if i == panel.selected:
-                line.append("▸ ", style=theme.accent)
-            line.append(f"[{item.hotkey}]", style=theme.accent)
-            line.append(f" {item.label}", style=theme.fg)
-    if countdown is not None:
-        filled = min(countdown // 3, _GAUGE_CELLS)
-        gauge = "█" * filled + "░" * (_GAUGE_CELLS - filled)
-        line.append(f"  {gauge} {countdown}s", style=theme.bad if countdown <= 5 else theme.dim)
-    return line
-
-
-def _keybar(theme: Theme) -> Text:
-    return Text("Ctrl-C 退出", style=theme.dim)
-
-
-def rich_frame(view: SeatView, ui: UiState, ctx: FrameContext, width: int, height: int) -> Group:
-    tier = rich_tier(width, height)
-    budget = rich_budget(tier, len(view.seats))
-    lines = [
-        *_header_slot(view, ui, ctx, budget),
-        *_seats_slot(view, ctx, tier, width, budget),
-        *_community_slot(view, ctx, tier, budget),
-        *_hero_slot(view, ctx, tier, budget),
-        *_log_slot(view, ui, ctx, budget),
-        *_action_rich_slot(view, ui, ctx, budget),
-        *_keybar_slot(ui, ctx, budget),
-    ]
-    return Group(*lines)
-
-
-def _header_slot(view: SeatView, ui: UiState, ctx: FrameContext, budget: Budget) -> list:
-    line = _header(view, ctx)
-    if ui.notice:
-        line.append("  ")
-        line.append(ui.notice, style=ctx.theme.accent)
-    return [line]
-
-
-def _anchor(view: SeatView, ctx: FrameContext) -> int:
-    if ctx.viewer is not None:
-        for info in view.seats:
-            if info.name == ctx.viewer:
-                return info.index
-    return view.button
-
-
-def _seats_slot(view: SeatView, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list:
-    theme = ctx.theme
-    n = len(view.seats)
-    boxed = n <= 6 and tier is not Tier.COMPACT
-    order = seat_order(n, _anchor(view, ctx))
-    if not boxed:
-        cells = [_seat_cell(view.seats[i], view, ctx.viewer, theme) for i in order]
-        rows = []
-        for half in range(0, n, 2):
-            pair = cells[half:half + 2]
-            if len(pair) == 1:
-                pair.append(Text())
-            rows.append(Text("   ").join(pair))
-        return [*rows, *[Text()] * (budget.seats - len(rows))]
-    box_w = seat_box_width([info.name for info in view.seats], width, boxed=True)
-    boxes = [_seat_box(view.seats[i], view, ctx, box_w) for i in order]
-    rows = []
-    for half in range(0, len(boxes), 2):
-        pair = boxes[half:half + 2]
-        if len(pair) == 1:
-            pair = _blank_box(box_w, theme), pair[0]
-        for row in range(3):
-            line = Text()
-            for j, box in enumerate(pair):
-                if j:
-                    line.append("  ")
-                line += box[row]
-            rows.append(line)
-    return [*rows, *[Text()] * (budget.seats - len(rows))]
-
-
-def _seat_box(info: SeatInfo, view: SeatView, ctx: FrameContext, w: int) -> list[Text]:
-    theme = ctx.theme
-    inner = w - 2
-    is_viewer = ctx.viewer is not None and info.name == ctx.viewer
-    acting = info.index == view.to_act
-    out = info.folded and info.stack == 0 and view.street is not Street.HAND_OVER
-    folded = info.folded and not out
-    left = Text()
-    if is_viewer:
-        left.append(f"{SYMBOLS['hero']} ", style=theme.accent)
-    elif acting:
-        left.append(f"{SYMBOLS['to_act']} ", style=theme.accent)
-    if info.is_button:
-        left.append(f"{SYMBOLS['button']} ", style=theme.gold)
-    if out:
-        left.append(_fit(f"{info.name}（出局）", inner), style=theme.dim)
-        body = left
-    else:
-        status = ""
-        if info.allin:
-            status = " 全下"
-        elif folded:
-            status = " 弃牌"
-        right_w = len(f"{info.stack:,}") + (len(status) if status else 0) + 2
-        name_style = theme.dim if folded else theme.fg
-        name = _fit(info.name, max(inner - visible(left) - right_w - 1, 4))
-        left.append(name, style=f"strike {theme.dim}" if folded else name_style)
-        body = left
-        body.append("  ", style=theme.dim)
-        body.append(f"{info.stack:,}", style=theme.gold if info.allin else theme.fg)
-        if info.street_bet > 0:
-            body.append(f" 注{info.street_bet}", style=theme.gold)
-        if status:
-            body.append(status, style=theme.bad if info.allin else theme.dim)
-    top_style = theme.accent if (acting or is_viewer) else theme.gold if info.allin else theme.dim if (folded or out) else theme.border
-    if acting or is_viewer:
-        top, bottom = f"╭{'─' * inner}╮", f"╰{'─' * inner}╯"
-    else:
-        top, bottom = f"┌{'─' * inner}┐", f"└{'─' * inner}┘"
-    return [Text(top, style=top_style), _pad_line(body, inner), Text(bottom, style=top_style)]
-
-
-def _pad_line(line: Text, inner: int) -> Text:
-    line.append(" " * max(inner - visible(line), 0))
-    return line
-
-
-def _blank_box(w: int, theme: Theme) -> list[Text]:
-    inner = w - 2
-    blank = Text(" " * inner)
-    return [Text(f"┌{'─' * inner}┐", style=theme.border), blank, Text(f"└{'─' * inner}┘", style=theme.border)]
-
-
-def visible(line: Text) -> int:
-    return cell_len(line.plain)
-
-
-def _fit(text: str, width: int) -> str:
-    if cell_len(text) <= width:
-        return text
-    return text[:max(width - 1, 0)] + "…"
-
-
-def _community_slot(view: SeatView, ctx: FrameContext, tier: Tier, budget: Budget) -> list:
-    theme = ctx.theme
-    slots = _COMMUNITY_SLOTS[view.street]
-    shown: list = list(view.community) + [None] * (slots - len(view.community))
-    if tier is Tier.COMPACT:
-        lines = [card_lines(card, MINI, theme) for card in shown]
-        rows = []
-        for row in range(MINI[1]):
-            line = Text()
-            for i, card in enumerate(lines):
-                if i:
-                    line.append(" ")
-                line += card[row]
-            if row == 1:
-                line.append(f"  底池 {_fmt(view.pot_total)}", style=theme.gold)
-            rows.append(line)
-        return rows
-    card_rows = []
-    for row in range(STANDARD[1]):
-        line = Text()
-        for i, card in enumerate([card_lines(card, STANDARD, theme) for card in shown]):
-            if i:
-                line.append(" ")
-            line += card[row]
-        card_rows.append(line)
-    panel = Panel(
-        Group(*card_rows),
-        title=f"底池 {_fmt(view.pot_total)}",
-        title_align="center",
-        border_style=theme.border,
-        box=ROUNDED,
-        expand=False,
-        padding=0,
-    )
-    return [Align.center(panel), *[Text()] * (budget.community - 7)]
-
-
-def _hero_slot(view: SeatView, ctx: FrameContext, tier: Tier, budget: Budget) -> list:
-    theme = ctx.theme
-    if not view.hole:
-        return [Text()] * budget.hero
-    size = WIDE if tier is Tier.WIDE else STANDARD
-    lines = [card_lines(card, size, theme) for card in view.hole]
-    rows = []
-    for row in range(size[1]):
-        line = Text()
-        for i, card in enumerate(lines):
-            if i:
-                line.append("   ")
-            line += card[row]
-        rows.append(line)
-    if len(view.community) >= 3:
-        rows.append(Text(find_best_hand((*view.hole, *view.community)).label(), style=theme.dim))
-    else:
-        rows.append(Text())
-    return [Align.center(Group(*rows)), *[Text()] * (budget.hero - len(rows))]
-
-
-def _log_slot(view: SeatView, ui: UiState, ctx: FrameContext, budget: Budget) -> list:
-    theme = ctx.theme
-    entries = [*view.log, *ui.chat]
-    lines = entries[-budget.log:]
-    block = Text()
-    for i, entry in enumerate(lines):
-        if i:
-            block.append("\n")
-        style = theme.fg if i == len(lines) - 1 else theme.dim
-        block.append(entry, style=style)
-    return [block, *[Text()] * (budget.log - len(lines))]
-
-
-def _action_rich_slot(view: SeatView, ui: UiState, ctx: FrameContext, budget: Budget) -> list:
-    theme = ctx.theme
-    if ui.confirm_quit:
-        body = Text("再按 Enter / Ctrl-C 确认退出 · Esc 取消", style=theme.bad)
-        title = "退出"
-        border = theme.bad
-    elif ui.panel is not None:
-        body = _panel_lines(ui.panel, ui.countdown, theme)
-        title = "你的行动"
-        border = theme.accent
-    else:
-        waiting = view.seats[view.to_act].name if view.to_act is not None else ""
-        body = Text(f"{SYMBOLS['to_act']} {waiting} 行动中…", style=theme.dim)
-        title = "等待"
-        border = theme.border
-    panel = Panel(
-        body if isinstance(body, Text) else Group(*body),
-        title=title,
-        border_style=border,
-        box=ROUNDED,
-        expand=False,
-        padding=(0, 2),
-    )
-    return [Align.left(panel), *[Text()] * (budget.action - 4)]
-
-
-def _panel_lines(panel: ActionPanel, countdown: int | None, theme: Theme) -> list[Text]:
-    row1 = _panel_slot(panel, None, theme)
-    row2 = Text(style=theme.dim)
-    if panel.raising:
-        row2.append("←→ 调额 · 1-4 档位 · Enter 确认 · Esc 返回")
-    else:
-        row2.append("↑↓ 选择 · Enter 确认")
-    if countdown is not None:
-        filled = min(countdown // 3, _GAUGE_CELLS)
-        gauge = "█" * filled + "░" * (_GAUGE_CELLS - filled)
-        row2.append(f"  {gauge} {countdown}s", style=theme.bad if countdown <= 5 else theme.dim)
-    return [row1, row2]
-
-
-def _keybar_slot(ui: UiState, ctx: FrameContext, budget: Budget) -> list:
-    return [_keybar(ctx.theme)]

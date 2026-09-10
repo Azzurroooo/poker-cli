@@ -202,6 +202,10 @@ class Room:
         finally:
             self._lobby = False
 
+    def _save_display(self, display: str) -> None:
+        self.settings.display = display
+        self.settings.save()
+
     def _roster(self, ip: str) -> str:
         lines = [f"房间「{self.room_name}」  {ip}:{self.port}"]
         for i, name in enumerate(self.names):
@@ -222,6 +226,9 @@ class Room:
             self.terminal,
             FrameContext(self.theme, self.room_name, self.settings.nickname, self.settings.blinds),
             self.settings.act_seconds,
+            display=self.settings.display,
+            chat_send=self._say,
+            on_display_change=self._save_display,
         )
         self._screen = screen
         await screen.start()

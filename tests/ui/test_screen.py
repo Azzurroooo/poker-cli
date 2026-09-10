@@ -10,7 +10,7 @@ from rpoker.domain.actions import Action, LegalActions
 from rpoker.domain.views import SeatInfo, SeatView, Street
 from rpoker.ui.panels import ActionPanel
 from rpoker.ui.prompts import QuitApp, Terminal
-from rpoker.ui.render import FrameContext, UiState, simple_frame
+from rpoker.ui.render import FrameContext, OverlayState, UiState, simple_frame
 from rpoker.ui.screen import GameScreen
 from rpoker.ui.tokens import THEMES
 from tests.engine.helpers import cards
@@ -122,7 +122,63 @@ def test_frame_line_height_is_constant_across_turns() -> None:
 
     def height(ui: UiState) -> int:
         buffer = io.StringIO()
-        Console(file=buffer, force_terminal=True, width=100, highlight=False).print(simple_frame(view, ui, ctx))
+        Console(file=buffer, force_terminal=True, width=100, highlight=False).print(simple_frame(view, ui, ctx, 80))
         return len(buffer.getvalue().rstrip("\n").split("\n"))
 
     assert height(acting) == height(idle), "frame height must not change when the turn passes"
+
+
+def test_switch_display_flips_and_notifies() -> None:
+    screen = make_screen()
+    seen: list[str] = []
+    screen.on_display_change = seen.append
+
+    async def run() -> None:
+        await screen.start()
+        screen._switch_display()
+        await screen.close()
+
+    asyncio.run(run())
+    assert screen.display == "simple"
+    assert seen == ["simple"]
+    assert screen._notice == "已切换为简单模式"
+
+
+def test_draft_key_flow_sends_and_cancels() -> None:
+    screen = make_screen()
+    sent: list[str] = []
+
+    async def send(text: str) -> None:
+        sent.append(text)
+
+    screen.chat_send = send
+
+    async def run() -> None:
+        screen._draft = ""
+        for char in "你好":
+            await screen._draft_key(char)
+        assert screen._draft == "你好"
+        await screen._draft_key("backspace")
+        assert screen._draft == "你"
+        await screen._draft_key("enter")
+        assert screen._draft is None
+        screen._draft = ""
+        await screen._draft_key("escape")
+        assert screen._draft is None
+
+    asyncio.run(run())
+    assert sent == ["你"]
+
+
+def test_overlay_key_scrolls_and_closes() -> None:
+    screen = make_screen()
+    screen._overlay = OverlayState("history", 0)
+
+    screen._overlay_key("up")
+    assert screen._overlay.scroll == 1
+    screen._overlay_key("down")
+    assert screen._overlay.scroll == 0
+    screen._overlay_key("down")
+    assert screen._overlay.scroll == 0  # clamped, no negative scroll
+    screen._overlay_key("escape")
+    assert screen._overlay is None
