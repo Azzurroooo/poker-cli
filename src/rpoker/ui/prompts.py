@@ -188,14 +188,13 @@ class Terminal:
         self._write("\r" + self._ansi_line(renderable) + "\x1b[K")
 
     def _ansi_line(self, renderable) -> str:
-        """Render to a single ANSI string, hard-cropped one column short of the terminal
-        width so glyph overflow of ambiguous-width characters can never wrap the line."""
+        """Render to a single ANSI string, hard-cropped to terminal width so it never wraps."""
         buffer = io.StringIO()
         offscreen = Console(
             file=buffer,
             force_terminal=True,
             color_system=self.console.color_system or "truecolor",
-            width=max(self.console.width - 1, 1),
+            width=self.console.width,
             highlight=False,
             legacy_windows=False,
         )
@@ -385,10 +384,10 @@ class Terminal:
                     bar.append(f"[{hotkey}]", style=theme.accent)
                     bar.append(f" {label}", style=theme.fg)
                 bar.append("  M 聊天", style=theme.dim)
-            if view.deadline is not None:
-                remaining = max(int(view.deadline - time.monotonic()), 0)
-                gauge = "█" * min(remaining // 3, 10) + "░" * max(10 - remaining // 3, 0)
-                bar.append(f" {gauge} {remaining}s", style=theme.bad if remaining <= 5 else theme.dim)
+                if view.deadline is not None:
+                    remaining = max(int(view.deadline - time.monotonic()), 0)
+                    gauge = "█" * min(remaining // 3, 10) + "░" * max(10 - remaining // 3, 0)
+                    bar.append(f" {gauge} {remaining}s", style=theme.bad if remaining <= 5 else theme.dim)
                 if bar.plain != shown:
                     self._redraw_line(bar)
                     shown = bar.plain
