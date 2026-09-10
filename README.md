@@ -1,6 +1,8 @@
 # poker-cli
 
-局域网多人德州扑克（无限注德州扑克）终端应用。一条命令启动，房主创建房间后，同一局域网内的牌友无需任何配置即可在房间列表中看到并加入。
+[English](README.md) · [简体中文](README.zh-CN.md)
+
+A terminal app for LAN multiplayer Texas Hold'em (No-Limit Hold'em). Launch it with a single command; once the host creates a room, friends on the same LAN can see it in the room list and join with zero configuration.
 
 ```
 ██████╗  ██████╗ ██╗  ██╗███████╗██████╗        ██████╗██╗     ██╗
@@ -11,62 +13,62 @@
 ╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝       ╚═════╝╚══════╝╚═╝
 ```
 
-## 安装
+## Install
 
-需要 [uv](https://docs.astral.sh/uv/)。在本仓库根目录：
+Requires [uv](https://docs.astral.sh/uv/). From the repository root:
 
 ```bash
-uv sync                # 安装依赖（自动准备 Python 3.11+）
-uv run poker-cli       # 启动
+uv sync                # Install dependencies (sets up Python 3.11+ automatically)
+uv run poker-cli       # Launch
 ```
 
-或安装为全局命令：
+Or install it as a global command:
 
 ```bash
 uv tool install .
 poker-cli
 ```
 
-运行时依赖仅 `rich` 与 `prompt_toolkit`，网络部分全部使用标准库。
+Runtime dependencies are just `rich` and `prompt_toolkit`; all networking uses the standard library.
 
-## 玩法
+## How to play
 
-- **创建房间**：主菜单 → 创建房间 → 设置房名/人数/盲注 → 等待区按 Enter 开局（空位自动由 bot 补齐）。
-- **加入房间**：主菜单 → 加入房间 → 从自动发现的列表中选择（显示 N/M 人数，满桌与对局中的房间自动隐藏；或手动输入 `IP:端口`）。
-- **本地练习**：与 3 个 bot 对战。
-- 昵称与房主相同的玩家加入时自动改名为 `昵称2`、`昵称3`…（同机双开测试直接可用）。
+- **Create a room**: Main menu → Create room → set room name / table size / blinds → press Enter in the waiting area to start (empty seats are auto-filled by bots).
+- **Join a room**: Main menu → Join room → pick from the auto-discovered list (shows N/M players; full tables and rooms already in a hand are hidden automatically; or type `IP:port` manually).
+- **Local practice**: play against 3 bots.
+- If a joiner's nickname equals the host's, it is auto-renamed to `nickname2`, `nickname3`, … (handy for testing two clients on one machine).
 
-对局键位：
+In-game keys:
 
-| 键 | 作用 |
+| Key | Action |
 |---|---|
-| `F` / `C` / `R` / `A` | 弃牌 / 过牌或跟注 / 加注 / 全下（首字母直选） |
-| `←` `→` | 加注页调整金额（另有 1 最小 / 2 半池 / 3 满池 / 4 全下） |
-| `↑` `↓` + `Enter` | 菜单选择（数字直选） |
-| `M` | 行动时发聊天 |
-| `Q` | 房主等待区关闭房间 |
+| `F` / `C` / `R` / `A` | Fold / Check or Call / Raise / All-in (first-letter shortcuts) |
+| `←` `→` | Adjust the raise amount (also 1 min / 2 half-pot / 3 pot / 4 all-in) |
+| `↑` `↓` + `Enter` | Menu selection (number keys also work) |
+| `M` | Send chat on your turn |
+| `Q` | Host closes the room from the waiting area |
 
-行动限时超时自动过牌/弃牌；玩家断线由系统代打到本手结束，牌局永不中断。
+When the action timer expires it auto-checks/folds; when a player disconnects the system plays their hand to the end — the game never stalls.
 
-## 规则范围
+## Rules covered
 
-标准无限注德州扑克：盲注与按钮轮转、单挑特判、最小加注与短额全下（不重开行动权）、边池分层结算、奇数筹码按按钮位顺序分配、未跟注退还、A-2-3-4-5 轮子。锦标赛制打到底（破产出局），局间可继续或结束并显示排名。
+Standard No-Limit Texas Hold'em: blind and button rotation, heads-up special cases, minimum raise and short all-in (which does not reopen the action), layered side-pot settlement, odd chips awarded in button order, uncalled bets returned, A-2-3-4-5 wheel. Played tournament-style to the end (busting = elimination); between hands you may continue or end and see the final standings.
 
-## 已知边界（v1 设计取舍）
+## Known limits (v1 design trade-offs)
 
-- 牌局开始后无法中途加入（等待区加入不受限）；断线玩家的座位不可顶替。
-- 跨子网/交换机隔离广播不可达时，请用「手动输入 IP」加入（房主等待区显示本机 IP）。
-- Windows 首次运行会弹出防火墙授权，请对专用网络勾选「允许」；仅同机联机无需此步。
-- 聊天入口：房主在等待区与行动时、客机在自己的行动提示时（`M`）。
+- No joining once a hand has started (joins in the waiting area are unrestricted); a disconnected player's seat cannot be taken over.
+- When broadcast cannot cross subnets or isolated switches, join via manual IP entry (the host's waiting area shows the local IP).
+- On Windows the first run raises a firewall prompt — allow it for private networks; same-machine play does not need this.
+- Chat entry points: the host in the waiting area and on their turn, clients on their own turn prompt (`M`).
 
-Windows 用户建议使用 Windows Terminal；若牌面花色乱码，先执行 `chcp 65001`。
+On Windows, prefer Windows Terminal; if card suits render incorrectly, run `chcp 65001` first.
 
-## 开发
+## Development
 
 ```bash
-uv run pytest              # 48 个引擎/协议/UI 测试
-uv run python tests/e2e_lan.py   # 双进程端到端对局（创建→发现→加入→对战→结算）
+uv run pytest              # 48 engine/protocol/UI tests
+uv run python tests/e2e_lan.py   # Two-process end-to-end game (create → discover → join → play → settle)
 uv run ruff check src tests
 ```
 
-架构与设计决策见 [.docs/DESIGN.md](.docs/DESIGN.md)：`domain ← engine ← {actors, ui, net} ← app` 单向依赖，引擎为唯一状态权威，RNG/时钟全量注入，同一 seed 整局可重放。
+See [.docs/DESIGN.md](.docs/DESIGN.md) for architecture and design decisions: one-way dependency `domain ← engine ← {actors, ui, net} ← app`, the engine is the sole authority for state, RNG/clock are fully injected, and an entire game is replayable from the same seed.
