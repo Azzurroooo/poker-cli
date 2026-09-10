@@ -73,9 +73,9 @@ async def _create(terminal: Terminal, settings: Settings) -> None:
 async def _join(terminal: Terminal, settings: Settings) -> None:
     console = terminal.console
     console.print("[dim]正在扫描局域网房间…[/dim]")
-    rooms = await beacon.discover(3.0)
+    rooms = [r for r in await beacon.discover(3.0) if not r.full and not r.in_hand]
     options = [
-        Option(f"{r.name}  [dim]{r.ip} · {r.seats} 人 · {'对局中' if r.in_hand else '等待中'}[/dim]")
+        Option(f"{r.name}  [dim]{r.ip} · {r.seats}/{r.max_seats} 人 · 等待中[/dim]")
         for r in rooms
     ]
     options.append(Option("手动输入 IP 加入"))
@@ -93,8 +93,6 @@ async def _join(terminal: Terminal, settings: Settings) -> None:
         return
     target = rooms[choice]
     console.clear()
-    if target.in_hand:
-        console.print("[yellow]该房间正在对局中，加入请求将被拒绝。[/yellow]")
     await client.join_room(terminal, settings, target.ip, target.port)
 
 

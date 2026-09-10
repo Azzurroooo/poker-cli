@@ -67,14 +67,14 @@ def wait_for(player: Player, text: str, timeout: float = 60, other: Player | Non
 
 def main() -> None:
     tmp = tempfile.mkdtemp(prefix="rp-e2e-")
+    room_name = f"e2e-{os.getpid()}"
     host = Player("host", tmp)
-    client = Player("client", tmp)
 
-    host.send("Host")
+    host.send("Player")
     wait_for(host, "1. 创建房间")
     host.send("1")
     wait_for(host, "房间名")
-    host.send("")                                   # default room name
+    host.send(room_name)
     wait_for(host, "桌子人数")
     host.send("1")                                  # 2 players
     wait_for(host, "选择盲注")
@@ -85,15 +85,18 @@ def main() -> None:
         [sys.executable, "-c",
          ("import asyncio, json; from rpoker.net.beacon import discover; "
          "rooms = asyncio.run(discover(4.0)); "
-         "print(json.dumps([{'name': r.name, 'port': r.port} for r in rooms]))")],
+         "print(json.dumps([{'name': r.name, 'ip': r.ip, 'port': r.port} for r in rooms]))")],
         env=dict(os.environ, PYTHONPATH=os.path.join(ROOT, "src"), PYTHONIOENCODING="utf-8"),
         cwd=ROOT, capture_output=True, text=True, timeout=30, check=True,
     )
     rooms = json.loads(found.stdout.strip().splitlines()[-1])
-    assert any(r["port"] == 45691 for r in rooms), f"discovery failed: {rooms}"
-    print(f"[OK] UDP discovery found room on port {rooms[0]['port']}")
+    mine = [r for r in rooms if r["name"] == room_name and r["ip"] == "127.0.0.1"]
+    assert mine, f"discovery failed to find {room_name}: {rooms}"
+    print(f"[OK] UDP discovery found room {room_name} on port {mine[0]['port']}")
 
-    client.send("Guest")
+    # launched after host saved config → same APPDATA, same saved nickname "Player":
+    # must be auto-renamed by the host, not rejected as "table full"
+    client = Player("client", tmp)
     wait_for(client, "1. 创建房间")
     client.send("2")                                # 加入房间
     wait_for(client, "选择要加入的房间")
@@ -103,10 +106,13 @@ def main() -> None:
     if option_numbers:
         client.send(option_numbers[0][0])
         wait_for(client, "房间地址")
-        client.send("127.0.0.1:45691")
+        client.send(f"127.0.0.1:{mine[0]['port']}")
     else:
         raise SystemExit(f"[FAIL] manual option not found.\nClient output:\n{client.buffer[-2000:]}")
     wait_for(client, "已加入")
+    if "昵称 player2" not in client.buffer.lower():
+        raise SystemExit(f"[FAIL] rename missing. Client tail:\n{client.buffer[-500:]!r}\nHost tail:\n{host.buffer[-300:]!r}")
+    print("[OK] duplicate nickname auto-renamed to player2")
 
     host.send("")                                   # start the game
     wait_for(host, "第 1 手", timeout=30)

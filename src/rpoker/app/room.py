@@ -54,6 +54,8 @@ class Room:
         self.conns: list[_Conn] = []
         self.started = False
         self.port = 0
+        self.events: asyncio.Queue[str] = asyncio.Queue()
+        self._lobby = False
         self._adv_task: asyncio.Task | None = None
         self._server: asyncio.Server | None = None
 
@@ -68,8 +70,8 @@ class Room:
         finally:
             await self._shutdown()
 
-    def _status(self) -> tuple[int, bool]:
-        return sum(1 for n in self.names if n is not None), self.started
+    def _status(self) -> tuple[int, int, bool]:
+        return sum(1 for n in self.names if n is not None), self.settings.table_size, self.started
 
     def _bind(self) -> bool:
         for port in range(TCP_PORT, TCP_PORT + PORT_RANGE):
@@ -90,14 +92,18 @@ class Room:
             hello = await asyncio.wait_for(connector.recv(), timeout=5)
             if not isinstance(hello, Hello):
                 raise TypeError("expected hello")
-            name = hello.name.strip() or "玩家"
-            seat = self._free_seat(name)
-            if seat is None:
-                await connector.send(Error("table_full"))
-                return
             if self.started:
                 await connector.send(Error("started"))
                 return
+            seat = next((i for i, n in enumerate(self.names) if n is None), None)
+            if seat is None:
+                await connector.send(Error("table_full"))
+                return
+            base = hello.name.strip() or "玩家"
+            name, n = base, 2
+            while any(taken == name for taken in self.names):
+                name = f"{base}{n}"
+                n += 1
             conn = _Conn(connector, name, seat)
             self.names[seat] = name
             self.conns.append(conn)
@@ -107,16 +113,8 @@ class Room:
             )
             await self._say(f"系统：{name} 加入了房间")
             await self._pump(conn)
-        except (TimeoutError, ValueError, ConnectionError, OSError):
+        except (TimeoutError, TypeError, ConnectionError, OSError):
             await connector.close()
-
-    def _free_seat(self, name: str) -> int | None:
-        for i, taken in enumerate(self.names):
-            if taken is None:
-                return i
-            if taken == name:
-                return None
-        return None
 
     async def _pump(self, conn: _Conn) -> None:
         while True:
@@ -135,7 +133,10 @@ class Room:
         await self._say(f"系统：{conn.name} 离开了房间")
 
     async def _say(self, line: str) -> None:
-        print(line)
+        if self._lobby:
+            self.events.put_nowait(line)
+        else:
+            print(line)
         for conn in list(self.conns):
             if not conn.alive:
                 continue
@@ -147,31 +148,55 @@ class Room:
     async def _waiting(self) -> None:
         terminal = self.terminal
         ip = _lan_ip()
-        while True:
-            roster = self._roster(ip)
-            terminal.print(roster)
-            terminal.print("[dim]Enter 开始牌局 · M 聊天 · Q 关闭房间（等待牌友加入…）[/dim]")
-            key = await terminal.key(1.0)
-            if key is None:
-                self.terminal._erase_above(_height(roster))
-                continue
-            if key in ("enter", ""):
-                if sum(1 for n in self.names if n is not None) >= 2:
-                    self.terminal._erase_above(_height(roster))
-                    await self._play()
+        spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        frame = 0
+        printed = 0
+        members: tuple[str | None, ...] | None = None
+        self._lobby = True
+        try:
+            while True:
+                while not self.events.empty():
+                    terminal._erase_above(printed)
+                    terminal.print(self.events.get_nowait())
+                    printed = 0
+                    members = None
+                roster = self._roster(ip)
+                height = _height(roster)
+                if members != tuple(self.names):
+                    if printed:
+                        terminal._erase_above(printed)
+                    terminal.print(roster)
+                    printed = height
+                    members = tuple(self.names)
+                terminal._redraw_line(
+                    Text(f"{spinner[frame % len(spinner)]} ", style=self.theme.accent)
+                    .append("等待牌友加入…  ", style=self.theme.fg)
+                    .append("Enter 开局 · M 聊天 · Q 关闭", style=self.theme.dim)
+                )
+                key = await terminal.key(0.15)
+                frame += 1
+                if key is None:
+                    continue
+                if key in ("enter", ""):
+                    if sum(1 for n in self.names if n is not None) >= 2:
+                        terminal._erase_above(printed)
+                        await self._play()
+                        return
+                    terminal._erase_above(printed)
+                    terminal.print("[red]至少需要 2 名玩家才能开局（空位开局时由 bot 补齐）。[/red]")
+                    await terminal.key(1.5)
+                elif key == "q":
+                    terminal._erase_above(printed)
                     return
-                terminal.print("[red]至少需要 2 名玩家才能开局。[/red]")
-                await terminal.key(1.5)
-                self.terminal._erase_above(1)
-            elif key == "q":
-                return
-            elif key == "m":
-                self.terminal._erase_above(_height(roster))
-                text = await terminal.ask("聊天：")
-                if text:
-                    await self._say(f"{self.settings.nickname}：{text}")
-            else:
-                self.terminal._erase_above(_height(roster))
+                elif key == "m":
+                    terminal._erase_above(printed)
+                    text = await terminal.ask("聊天：")
+                    if text:
+                        await self._say(f"{self.settings.nickname}：{text}")
+                    printed = 0
+                    members = None
+        finally:
+            self._lobby = False
 
     def _roster(self, ip: str) -> str:
         lines = [f"房间「{self.room_name}」  {ip}:{self.port}"]

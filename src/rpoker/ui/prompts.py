@@ -164,6 +164,10 @@ class Terminal:
     def _erase_above(self, lines: int) -> None:
         self._write(f"\x1b[{lines}A\x1b[J")
 
+    def _redraw_line(self, renderable) -> None:
+        self._write("\r\x1b[2K")
+        self.console.print(renderable, end="")
+
     async def ask(self, prompt: str, default: str = "") -> str:
         self.console.print(prompt + (f" [dim]（回车 = {default}）[/dim]" if default else ""))
         if not self.tty:
@@ -337,6 +341,7 @@ class Terminal:
             buttons.append(("R", "加注"))
         if not legal.can_check:
             buttons.append(("A", "全下"))
+        shown: str | None = None
         while True:
             bar = Text()
             for i, (hotkey, label) in enumerate(buttons):
@@ -349,12 +354,13 @@ class Terminal:
                 remaining = max(int(view.deadline - time.monotonic()), 0)
                 gauge = "█" * min(remaining // 3, 10) + "░" * max(10 - remaining // 3, 0)
                 bar.append(f"   ⏱ {gauge} {remaining}s", style=theme.bad if remaining <= 5 else theme.dim)
-            self.print(bar)
+            if bar.plain != shown:
+                self._redraw_line(bar)
+                shown = bar.plain
             key = await self.key(0.25)
-            self._erase_above(1)
-            if key is None:
-                continue
-            return key
+            if key is not None:
+                self._write("\n")
+                return key
 
     async def _raise_page(self, legal: LegalActions, theme: Theme, view: SeatView) -> int | None:
         step = max(view.pot_total // 20, 1)

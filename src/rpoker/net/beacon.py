@@ -18,10 +18,15 @@ class RoomInfo:
     port: int
     name: str
     seats: int
+    max_seats: int
     in_hand: bool
 
+    @property
+    def full(self) -> bool:
+        return self.seats >= self.max_seats
 
-async def advertise(port: int, room_name: str, status: Callable[[], tuple[int, bool]]) -> None:
+
+async def advertise(port: int, room_name: str, status: Callable[[], tuple[int, int, bool]]) -> None:
     loop = asyncio.get_running_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -29,8 +34,8 @@ async def advertise(port: int, room_name: str, status: Callable[[], tuple[int, b
     frame = {"app": _APP_TAG, "v": 1, "name": room_name, "tcp": port}
     try:
         while True:
-            seats, in_hand = status()
-            frame.update(seats=seats, in_hand=in_hand)
+            seats, max_seats, in_hand = status()
+            frame.update(seats=seats, max=max_seats, in_hand=in_hand)
             data = json.dumps(frame).encode()
             await loop.sock_sendto(sock, data, ("255.255.255.255", BEACON_PORT))
             await loop.sock_sendto(sock, data, ("127.0.0.1", BEACON_PORT))
@@ -63,7 +68,8 @@ async def discover(seconds: float = 3.0) -> list[RoomInfo]:
                 continue
             info = RoomInfo(
                 ip=addr[0], port=int(frame.get("tcp", 0)), name=str(frame.get("name", "?")),
-                seats=int(frame.get("seats", 0)), in_hand=bool(frame.get("in_hand", False)),
+                seats=int(frame.get("seats", 0)), max_seats=int(frame.get("max", 0)),
+                in_hand=bool(frame.get("in_hand", False)),
             )
             rooms[(info.ip, info.port)] = info
         sock.close()
@@ -73,4 +79,4 @@ async def discover(seconds: float = 3.0) -> list[RoomInfo]:
     await asyncio.sleep(seconds)
     stop.set()
     thread.join()
-    return sorted(rooms.values(), key=lambda r: (r.in_hand, -r.seats))
+    return sorted(rooms.values(), key=lambda r: (r.in_hand, r.full, -r.seats))

@@ -32,12 +32,13 @@ async def join_room(terminal: Terminal, settings, ip: str, port: int) -> None:
     if not isinstance(reply, Welcome):
         await connector.close()
         return
-    terminal.print(f"已加入「{reply.room}」（座位 {reply.seat + 1}/{len(reply.names)}），等待房主开始牌局…")
-    await _game(terminal, settings, connector, reply, theme)
+    assigned = reply.names[reply.seat] or settings.nickname
+    terminal.print(f"已加入「{reply.room}」（座位 {reply.seat + 1}/{len(reply.names)}，昵称 {assigned}），等待房主开始牌局…")
+    await _game(terminal, settings, connector, reply, assigned, theme)
     terminal.print("[yellow]已与房间断开。[/yellow]")
 
 
-async def _game(terminal: Terminal, settings, connector, welcome: Welcome, theme) -> None:
+async def _game(terminal: Terminal, settings, connector, welcome: Welcome, display: str, theme) -> None:
     console = terminal.console
     console.clear()
     last_view: SeatView | None = None
@@ -53,7 +54,7 @@ async def _game(terminal: Terminal, settings, connector, welcome: Welcome, theme
                 if view.to_act == welcome.seat and view.deadline is None:
                     view = dataclasses.replace(view, deadline=time.monotonic() + welcome.act_seconds)
                 last_view = view
-                frames.update(render(view, theme, title=welcome.room, viewer=settings.nickname))
+                frames.update(render(view, theme, title=welcome.room, viewer=display))
                 if view.to_act == welcome.seat:
                     frames.pause()
                     try:
@@ -64,9 +65,11 @@ async def _game(terminal: Terminal, settings, connector, welcome: Welcome, theme
             elif isinstance(message, Result):
                 if last_view is not None:
                     frames.update(render(last_view, theme, result=message.result, title=welcome.room,
-                                         viewer=settings.nickname))
+                                         viewer=display))
             elif isinstance(message, Chat):
+                frames.pause()
                 console.print(message.text)
+                frames.resume()
     await connector.close()
 
 
