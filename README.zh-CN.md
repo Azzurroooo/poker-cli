@@ -71,4 +71,4 @@ uv run python tests/e2e_lan.py   # 双进程端到端对局（创建→发现→
 uv run ruff check src tests
 ```
 
-架构与设计决策见 [.docs/DESIGN.md](.docs/DESIGN.md)：`domain ← engine ← {actors, ui, net} ← app` 单向依赖，引擎为唯一状态权威，RNG/时钟全量注入，同一 seed 整局可重放。
+架构：`domain ← engine ← {actors, ui, net} ← app` 单向依赖，引擎为唯一状态权威，RNG/时钟全量注入，同一 seed 整局可重放。

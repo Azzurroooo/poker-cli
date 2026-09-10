@@ -71,4 +71,4 @@ uv run python tests/e2e_lan.py   # Two-process end-to-end game (create → disco
 uv run ruff check src tests
 ```
 
-See [.docs/DESIGN.md](.docs/DESIGN.md) for architecture and design decisions: one-way dependency `domain ← engine ← {actors, ui, net} ← app`, the engine is the sole authority for state, RNG/clock are fully injected, and an entire game is replayable from the same seed.
+Architecture: one-way dependency `domain ← engine ← {actors, ui, net} ← app`; the engine is the sole authority for state; RNG/clock are fully injected; and an entire game is replayable from the same seed.
