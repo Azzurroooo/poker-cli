@@ -7,9 +7,16 @@ from collections.abc import Awaitable, Callable
 from rpoker.domain.actions import Action
 from rpoker.domain.views import SeatView
 from rpoker.engine.table import HandResult
+from rpoker.ui.layout import Mode, effective_mode
 from rpoker.ui.panels import ActionPanel, action_line, auto_action, parse_action
 from rpoker.ui.prompts import Option, QuitApp, Terminal
-from rpoker.ui.render import FrameContext, UiState, interlude_summary, simple_frame
+from rpoker.ui.render import (
+    FrameContext,
+    UiState,
+    interlude_summary,
+    rich_frame,
+    simple_frame,
+)
 
 _POLL_SECONDS = 0.25
 
@@ -17,10 +24,11 @@ _POLL_SECONDS = 0.25
 class GameScreen:
     """Single-frame game UI: owns UI state, the only key router, and frame refresh."""
 
-    def __init__(self, terminal: Terminal, ctx: FrameContext, act_seconds: float) -> None:
+    def __init__(self, terminal: Terminal, ctx: FrameContext, act_seconds: float, display: str = "rich") -> None:
         self.terminal = terminal
         self.ctx = ctx
         self.act_seconds = act_seconds
+        self.display = display
         self.frames = terminal.frame_view()
         self._view: SeatView | None = None
         self._result: HandResult | None = None
@@ -144,7 +152,11 @@ class GameScreen:
             confirm_quit=self._confirm_quit,
             chat=tuple(self._chat),
         )
-        self.frames.update(simple_frame(self._view, self._result, ui, self.ctx))
+        console = self.terminal.console
+        if self.frames.active and effective_mode(self.display, console.width, console.height) is Mode.RICH:
+            self.frames.update(rich_frame(self._view, ui, self.ctx, console.width, console.height))
+        else:
+            self.frames.update(simple_frame(self._view, ui, self.ctx))
 
     def _router_pause(self) -> None:
         if self._router is not None:

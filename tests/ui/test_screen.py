@@ -122,7 +122,7 @@ def test_frame_line_height_is_constant_across_turns() -> None:
 
     def height(ui: UiState) -> int:
         buffer = io.StringIO()
-        Console(file=buffer, force_terminal=True, width=100, highlight=False).print(simple_frame(view, None, ui, ctx))
+        Console(file=buffer, force_terminal=True, width=100, highlight=False).print(simple_frame(view, ui, ctx))
         return len(buffer.getvalue().rstrip("\n").split("\n"))
 
     assert height(acting) == height(idle), "frame height must not change when the turn passes"
