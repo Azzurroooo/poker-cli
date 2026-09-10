@@ -10,7 +10,16 @@ from rich.text import Text
 from rpoker.domain.cards import find_best_hand, rank_label
 from rpoker.domain.views import SeatInfo, SeatView, Street
 from rpoker.engine.table import HandResult
-from rpoker.ui.cards import MINI, STANDARD, WIDE, card_lines, card_text, suit_style
+from rpoker.ui.cards import (
+    HIDDEN,
+    MINI,
+    NORMAL,
+    STANDARD,
+    WIDE,
+    card_lines,
+    card_text,
+    suit_style,
+)
 from rpoker.ui.layout import (
     Budget,
     Tier,
@@ -64,6 +73,13 @@ class UiState:
     notice: str | None = None
     overlay: OverlayState | None = None
     draft: str | None = None
+    hero_hidden: bool = False
+    reveal_upto: int | None = None
+    reveal_lines: tuple[str, ...] = ()
+    winners: frozenset[str] = frozenset()
+    pot_pulse: bool = False
+    thinking: int | None = None
+    tick: int = 0
 
 
 def simple_frame(view: SeatView, ui: UiState, ctx: FrameContext, width: int) -> Text:
@@ -78,7 +94,7 @@ def simple_frame(view: SeatView, ui: UiState, ctx: FrameContext, width: int) -> 
         _blank(),
         *_hole_lines(view, theme),
         _blank(),
-        *_log_lines(view, ui.chat, theme, _LOG_LINES),
+        *_log_lines(view, ui, theme, _LOG_LINES),
         _action_line_slot(view, ui, ctx),
         _keybar(ui, theme),
     ]
@@ -95,13 +111,13 @@ def rich_frame(view: SeatView, ui: UiState, ctx: FrameContext, width: int, heigh
     else:
         mid = [
             *_seats_box_lines(view, ui, ctx, tier, width, budget),
-            *_community_lines(view, ctx, tier, width, budget),
-            *_hero_lines(view, ctx, tier, width, budget),
+            *_community_lines(view, ui, ctx, tier, width, budget),
+            *_hero_lines(view, ui, ctx, tier, width, budget),
         ]
     lines = [
         _header(view, ui, ctx),
         *mid,
-        *_log_lines(view, ui.chat, theme, budget.log),
+        *_log_lines(view, ui, theme, budget.log),
         *_action_box_lines(view, ui, ctx, budget),
         _keybar(ui, theme),
     ]
@@ -249,10 +265,13 @@ def _seat_box(info: SeatInfo, view: SeatView, ui: UiState, ctx: FrameContext, w:
     inner = w - 2
     is_viewer = ctx.viewer is not None and info.name == ctx.viewer
     acting = info.index == view.to_act
+    winner = info.name in ui.winners
     out = info.folded and info.stack == 0 and view.street is not Street.HAND_OVER
     folded = info.folded and not out
     body = Text()
-    if is_viewer:
+    if winner:
+        body.append(f"{SYMBOLS['winner']} ", style=theme.gold)
+    elif is_viewer:
         body.append(f"{SYMBOLS['hero']} ", style=theme.accent)
     elif acting:
         body.append(f"{SYMBOLS['to_act']} ", style=theme.accent)
@@ -273,8 +292,8 @@ def _seat_box(info: SeatInfo, view: SeatView, ui: UiState, ctx: FrameContext, w:
             body.append(bet, style=theme.gold)
         if status:
             body.append(status, style=theme.bad if info.allin else theme.dim)
-    border = theme.accent if (acting or is_viewer) else theme.gold if info.allin else theme.dim if (folded or out) else theme.border
-    corner = ("╭", "╮", "╰", "╯") if (acting or is_viewer) else ("┌", "┐", "└", "┘")
+    border = theme.gold if winner else theme.accent if (acting or is_viewer) else theme.gold if info.allin else theme.dim if (folded or out) else theme.border
+    corner = ("╭", "╮", "╰", "╯") if (acting or is_viewer or winner) else ("┌", "┐", "└", "┘")
     content = _pad(body, inner)
     return [
         Text(f"{corner[0]}{'─' * inner}{corner[1]}", style=border),
@@ -292,10 +311,11 @@ def _blank_box(w: int, theme: Theme) -> list[Text]:
     ]
 
 
-def _community_lines(view: SeatView, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
+def _community_lines(view: SeatView, ui: UiState, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
     theme = ctx.theme
     slots = _COMMUNITY_SLOTS[view.street]
     shown: list = list(view.community) + [None] * (slots - len(view.community))
+    shown = _apply_reveal(shown, ui.reveal_upto)
     if tier is Tier.COMPACT:
         ladder = [card_lines(card, MINI, theme) for card in shown]
         rows = []
@@ -319,17 +339,27 @@ def _community_lines(view: SeatView, ctx: FrameContext, tier: Tier, width: int, 
             line += card[row]
         card_rows.append(line)
     box_w = cell_len(card_rows[0].plain) + 2
-    lines = _boxed(card_rows, f"底池 {_fmt(view.pot_total)}", theme.border, box_w)
+    pulse = ui.pot_pulse
+    lines = _boxed(card_rows, f"底池 {_fmt(view.pot_total)}", theme.accent if pulse else theme.border, box_w)
+    if pulse:
+        lines[0] = Text("◈ ") + lines[0].copy()
     centered = [_center(line, width) for line in lines]
     return [*centered, *[_blank()] * (budget.community - len(centered))]
 
 
-def _hero_lines(view: SeatView, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
+def _apply_reveal(shown: list, upto: int | None) -> list:
+    if upto is None:
+        return shown
+    return [card if i < upto else None for i, card in enumerate(shown)]
+
+
+def _hero_lines(view: SeatView, ui: UiState, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
     theme = ctx.theme
     if not view.hole:
         return [_blank()] * budget.hero
     size = WIDE if tier is Tier.WIDE else STANDARD
-    ladder = [card_lines(card, size, theme) for card in view.hole]
+    state = HIDDEN if ui.hero_hidden else NORMAL
+    ladder = [card_lines(card, size, theme, state) for card in view.hole]
     rows = []
     for row in range(size[1]):
         line = Text()
@@ -345,8 +375,8 @@ def _hero_lines(view: SeatView, ctx: FrameContext, tier: Tier, width: int, budge
     return [*rows, *[_blank()] * (budget.hero - len(rows))]
 
 
-def _log_lines(view: SeatView, chat: tuple[str, ...], theme: Theme, count: int) -> list[Text]:
-    entries = [*view.log, *chat]
+def _log_lines(view: SeatView, ui: UiState, theme: Theme, count: int) -> list[Text]:
+    entries = [*view.log, *ui.chat, *ui.reveal_lines]
     lines = []
     for i, entry in enumerate(entries[-count:]):
         style = theme.fg if i == count - 1 else theme.dim
@@ -375,7 +405,8 @@ def _action_box_lines(view: SeatView, ui: UiState, ctx: FrameContext, budget: Bu
         title, border = "你的行动", theme.accent
     else:
         waiting = view.seats[view.to_act].name if view.to_act is not None else ""
-        rows = [Text(f"{SYMBOLS['to_act']} {waiting} 行动中…", style=theme.dim), _blank()]
+        dots = f" {SYMBOLS['thinking']}{'·' * (ui.tick % 3 + 1)}" if ui.thinking is not None else ""
+        rows = [Text(f"{SYMBOLS['to_act']} {waiting} 行动中{dots}", style=theme.dim), _blank()]
         title, border = "等待", theme.border
     inner = max(cell_len(row.plain) for row in rows) + 4
     lines = _boxed(rows, title, border, inner)

@@ -27,6 +27,7 @@ SYMBOLS: dict[str, str] = {
     "selected": "▸",
     "thinking": "●",
     "chip": "◍",
+    "winner": "★",
 }
 
 THEMES: dict[str, Theme] = {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from rpoker.domain.actions import Action
 from rpoker.domain.views import SeatView
@@ -21,7 +22,33 @@ from rpoker.ui.render import (
 
 _POLL_SECONDS = 0.25
 _NOTICE_SECONDS = 3.0
+_DEAL_STEP = 0.15
+_BOARD_STEP = 0.12
+_REVEAL_STEP = 0.25
+_WINNER_HOLD = 0.6
+_PULSE_STEP = 0.25
 DISPLAY_LABELS = {"rich": "丰富", "simple": "简单"}
+
+
+@dataclass(frozen=True, slots=True)
+class Changes:
+    hand_started: bool
+    new_community: int
+    pot_delta: int
+    to_act_changed: bool
+
+
+def diff_views(old: SeatView | None, new: SeatView) -> Changes:
+    """Derive presentation events from two snapshots; shared by host and client."""
+    if old is None:
+        return Changes(True, len(new.community), 0, True)
+    same_hand = new.hand_no == old.hand_no
+    return Changes(
+        hand_started=not same_hand,
+        new_community=len(new.community) - len(old.community) if same_hand else len(new.community),
+        pot_delta=new.pot_total - old.pot_total,
+        to_act_changed=new.to_act != old.to_act,
+    )
 
 
 class GameScreen:
@@ -55,6 +82,13 @@ class GameScreen:
         self._draft: str | None = None
         self._notice: str | None = None
         self._notice_until = 0.0
+        self._hero_hidden = False
+        self._reveal_upto: int | None = None
+        self._reveal_lines: tuple[str, ...] = ()
+        self._winners: frozenset[str] = frozenset()
+        self._pot_pulse = False
+        self._thinking: int | None = None
+        self._tick = 0
         self._keys: asyncio.Queue[str] = asyncio.Queue()
         self._router: asyncio.Task | None = None
 
@@ -82,9 +116,70 @@ class GameScreen:
 
     async def show(self, view: SeatView, result: HandResult | None = None) -> None:
         self._check_quit()
+        changes = diff_views(self._view, view)
         self._view = view
         self._result = result
+        if result is not None:
+            self._thinking = None
+        if changes.hand_started:
+            self._reveal_lines = ()
+            self._winners = frozenset()
+            self._reveal_upto = None
+        await self._present(changes, result)
+        self._set_thinking(view, changes)
         self._refresh()
+
+    def _is_rich(self) -> bool:
+        console = self.terminal.console
+        return (self.frames.active
+                and effective_mode(self.display, console.width, console.height) is Mode.RICH)
+
+    async def _present(self, changes: Changes, result: HandResult | None) -> None:
+        """Rich-mode performance only; simple and static modes jump straight to state."""
+        if not self._is_rich():
+            if result is not None:
+                self._reveal_lines = ()
+                self._winners = frozenset(award.name for award in result.awards)
+            return
+        if result is not None:
+            await self._showdown(result)
+            return
+        if changes.hand_started and self._view.hole:
+            self._hero_hidden = True
+            self._refresh()
+            await asyncio.sleep(_DEAL_STEP)
+            self._hero_hidden = False
+            self._refresh()
+            await asyncio.sleep(_DEAL_STEP)
+        elif changes.new_community and self._view is not None:
+            for shown in range(len(self._view.community) - changes.new_community + 1,
+                               len(self._view.community) + 1):
+                self._reveal_upto = shown
+                self._refresh()
+                await asyncio.sleep(_BOARD_STEP)
+            self._reveal_upto = None
+        if changes.pot_delta != 0:
+            self._pot_pulse = True
+            self._refresh()
+            await asyncio.sleep(_PULSE_STEP)
+            self._pot_pulse = False
+
+    async def _showdown(self, result: HandResult) -> None:
+        self._reveal_lines = ()
+        for name, hole in result.reveal.items():
+            self._reveal_lines = (*self._reveal_lines, f"{name} 亮牌 {' '.join(str(c) for c in hole)}")
+            self._refresh()
+            await asyncio.sleep(_REVEAL_STEP)
+        self._winners = frozenset(award.name for award in result.awards)
+        self._refresh()
+        await asyncio.sleep(_WINNER_HOLD)
+
+    def _set_thinking(self, view: SeatView, changes: Changes) -> None:
+        acting_bot = (view.to_act is not None
+                      and view.seats[view.to_act].name.endswith("（bot）"))
+        if view.to_act is None or changes.to_act_changed or acting_bot:
+            self._thinking = view.to_act if acting_bot else None
+            self._tick = 0
 
     def actor(self) -> Callable[[SeatView], Awaitable[Action]]:
         async def act(view: SeatView) -> Action:
@@ -96,6 +191,7 @@ class GameScreen:
         self._check_quit()
         if not self.terminal.tty:
             return await self._static_act(view)
+        self._thinking = None
         self._panel = ActionPanel.build(view.legal)
         self._belled = False
         deadline = view.deadline if view.deadline is not None else time.monotonic() + self.act_seconds
@@ -157,6 +253,9 @@ class GameScreen:
                 continue
             if key is None:
                 self._expire_notice()
+                if self._thinking is not None:
+                    self._tick += 1
+                    self._refresh()
                 continue
             match key:
                 case "v":
@@ -225,10 +324,8 @@ class GameScreen:
             self._belled = True
             self.terminal.console.bell()
 
-    def _refresh(self) -> None:
-        if self._view is None:
-            return
-        ui = UiState(
+    def _build_ui(self) -> UiState:
+        return UiState(
             panel=self._panel,
             countdown=self._countdown,
             confirm_quit=self._confirm_quit,
@@ -236,7 +333,19 @@ class GameScreen:
             notice=self._notice,
             overlay=self._overlay,
             draft=self._draft,
+            hero_hidden=self._hero_hidden,
+            reveal_upto=self._reveal_upto,
+            reveal_lines=self._reveal_lines,
+            winners=self._winners,
+            pot_pulse=self._pot_pulse,
+            thinking=self._thinking,
+            tick=self._tick,
         )
+
+    def _refresh(self) -> None:
+        if self._view is None:
+            return
+        ui = self._build_ui()
         console = self.terminal.console
         if self.frames.active and effective_mode(self.display, console.width, console.height) is Mode.RICH:
             self.frames.update(rich_frame(self._view, ui, self.ctx, console.width, console.height))
