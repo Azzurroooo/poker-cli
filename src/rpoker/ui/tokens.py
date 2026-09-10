@@ -18,6 +18,17 @@ class Theme:
     spade: str
 
 
+# Single source for every non-card glyph the UI renders. All entries are
+# single-cell wide so frames never misalign.
+SYMBOLS: dict[str, str] = {
+    "button": "●D",
+    "hero": "◆",
+    "to_act": "▶",
+    "selected": "▸",
+    "thinking": "●",
+    "chip": "◍",
+}
+
 THEMES: dict[str, Theme] = {
     "onedark": Theme(
         fg="#abb2bf", dim="#5c6370", accent="#61afef", good="#98c379", bad="#e06c75",
