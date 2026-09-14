@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import random
 
+import pytest
+
+from rpoker.app.table_loop import play_hand
 from rpoker.domain.actions import Action
 from rpoker.domain.views import Street
 from rpoker.engine.table import Table
@@ -169,3 +173,19 @@ def test_hole_cards_deal_two_rounds():
     assert table.seat_view(0).hole == cards("As Ah")
     assert table.seat_view(1).hole == cards("Ks Kh")
     assert table.seat_view(2).hole == cards("Qs Qh")
+
+
+def test_actor_errors_are_not_silently_converted_to_a_fold():
+    table = Table(["A", "B"], [100, 100], (5, 10), random.Random(1), act_seconds=1)
+
+    async def broken_actor(_view):
+        raise RuntimeError("render/input failure")
+
+    async def broadcast(_table):
+        pass
+
+    async def publish_result(_table):
+        pass
+
+    with pytest.raises(RuntimeError, match="render/input failure"):
+        asyncio.run(play_hand(table, {0: broken_actor, 1: broken_actor}, broadcast, publish_result))

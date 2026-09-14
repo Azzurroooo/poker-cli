@@ -66,8 +66,14 @@ class Budget:
 
 def rich_budget(tier: Tier, n_seats: int) -> Budget:
     boxed = n_seats <= 6 and tier is not Tier.COMPACT
-    rows = (n_seats + 1) // 2
-    seats = rows * 3 if boxed else rows
+    if boxed:
+        # The hero is rendered in the dedicated hand area. Keeping them out of
+        # the opponent grid gives the table a natural top-to-bottom rhythm and
+        # avoids showing the same player twice in one frame.
+        opponents = max(n_seats - 1, 1)
+        seats = ((opponents + 1) // 2) * 3
+    else:
+        seats = (n_seats + 1) // 2
     community = 7 if tier is not Tier.COMPACT else 4  # panel(5-card) vs inline mini row
     hero = 10 if tier is Tier.WIDE else 6
     log = 5 if tier is Tier.WIDE else 2 if tier is Tier.COMPACT else 3

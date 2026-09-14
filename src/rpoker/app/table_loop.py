@@ -32,8 +32,6 @@ async def play_hand(
             action = await asyncio.wait_for(actors[seat](view), timeout=table.act_seconds + 3)
         except TimeoutError:
             action = auto_action(view.legal)
-        except Exception:
-            action = auto_action(view.legal)
         table.apply(seat, action)
         await broadcast(table)
     await publish_result(table)

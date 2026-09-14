@@ -26,18 +26,24 @@ class KeyReader:
         self._raw = self._input.raw_mode()
         self._raw.__enter__()
         self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._closed = threading.Event()
         self._thread = threading.Thread(target=self._pump, daemon=True)
         self._thread.start()
 
     def _pump(self) -> None:
-        while True:
+        while not self._closed.is_set():
             try:
                 keys = self._input.read_keys()
             except Exception:
                 break
             for key in keys:
+                if self._closed.is_set():
+                    return
                 name = _KEY_NAMES.get(key.key, key.key)
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, name)
+                try:
+                    self._loop.call_soon_threadsafe(self._queue.put_nowait, name)
+                except RuntimeError:
+                    return
 
     async def get(self, timeout: float | None) -> str | None:
         if timeout is None:
@@ -48,6 +54,9 @@ class KeyReader:
             return None
 
     def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
         self._raw.__exit__(None, None, None)
         self._input.close()
 
@@ -94,35 +103,49 @@ class FrameView:
     plain reprint on pipes where rich Live never refreshes."""
 
     def __init__(self, terminal: Terminal) -> None:
+        self._terminal = terminal
         self._console = terminal.console
         self._tty = terminal.tty
         self._live: Live | None = None
+        self._active = False
         self._last: str | None = None
 
     @property
     def active(self) -> bool:
-        return self._live is not None
+        return self._active
 
     def start(self) -> None:
-        if self._tty and self._live is None:
-            self._live = Live(console=self._console, screen=True, auto_refresh=False, transient=False)
-            self._live.start()
+        if self._tty and not self._active:
+            self._active = True
+            # A forced Rich console backed by StringIO reports itself as a
+            # terminal but cannot run an alternate screen. Use direct writes
+            # there; real terminals get Live's cursor-safe screen handling.
+            is_real_tty = self._console.is_terminal and bool(
+                getattr(self._console.file, "isatty", lambda: False)()
+            )
+            if is_real_tty:
+                self._live = Live(console=self._console, screen=True, auto_refresh=False, transient=False)
+                self._live.start()
+            self._terminal.hide_cursor()
 
     def stop(self) -> None:
         if self._live is not None:
             self._live.stop()
             self._live = None
+        self._active = False
         self._last = None
+        self._terminal.show_cursor()
 
     def update(self, renderable) -> None:
-        if self._live is None:
-            self._console.print(renderable)
-            return
         text = self._ansi(renderable)
         if text == self._last:
             return
         self._last = text
-        self._live.update(renderable, refresh=True)
+        self._terminal.hide_cursor()
+        if self._live is None:
+            self._console.print(renderable)
+        else:
+            self._live.update(renderable, refresh=True)
 
     def _ansi(self, renderable) -> str:
         buffer = io.StringIO()

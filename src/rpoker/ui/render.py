@@ -118,7 +118,7 @@ def rich_frame(view: SeatView, ui: UiState, ctx: FrameContext, width: int, heigh
         _header(view, ui, ctx),
         *mid,
         *_log_lines(view, ui, theme, budget.log),
-        *_action_box_lines(view, ui, ctx, budget),
+        *_action_box_lines(view, ui, ctx, budget, width),
         _keybar(ui, theme),
     ]
     return _join(lines, width)
@@ -157,7 +157,7 @@ def _crop(line: Text, width: int) -> Text:
     out = Text(line.plain[:keep])
     for span in line.spans:
         if span.start < keep:
-            out.span(span.start, min(span.end, keep), span.style)
+            out.stylize(span.style, span.start, min(span.end, keep))
     return out
 
 
@@ -168,7 +168,19 @@ def _fmt(n: int) -> str:
 def _fit(text: str, width: int) -> str:
     if cell_len(text) <= width:
         return text
-    return text[:max(width - 1, 0)] + "…"
+    if width <= 0:
+        return ""
+    if width == 1:
+        return "…"
+    used = 0
+    keep = 0
+    for ch in text:
+        cells = cell_len(ch)
+        if used + cells > width - 1:
+            break
+        used += cells
+        keep += 1
+    return text[:keep] + "…"
 
 
 def _pad(line: Text, width: int) -> Text:
@@ -239,24 +251,30 @@ def _seats_lines(view: SeatView, ctx: FrameContext, width: int, rows: int) -> li
 def _seats_box_lines(view: SeatView, ui: UiState, ctx: FrameContext, tier: Tier, width: int, budget: Budget) -> list[Text]:
     theme = ctx.theme
     n = len(view.seats)
-    order = seat_order(n, _anchor(view, ctx))
+    anchor = _anchor(view, ctx)
     if n > 6 or tier is Tier.COMPACT:
         lines = _seats_lines(view, ctx, width, (n + 1) // 2)
         return [*lines, *[_blank()] * (budget.seats - len(lines))]
+    # The hero has a larger, dedicated hand area below the table. The upper
+    # grid is therefore reserved for opponents, with the dealer button still
+    # visible on the correct seat.
+    order = [i for i in seat_order(n, anchor) if i != anchor]
     box_w = seat_box_width([info.name for info in view.seats], width, boxed=True)
     boxes = [_seat_box(view.seats[i], view, ui, ctx, box_w) for i in order]
     lines = []
     for half in range(0, len(boxes), 2):
         pair = boxes[half:half + 2]
+        if not pair:
+            continue
         if len(pair) == 1:
-            pair = [_blank_box(box_w, theme), pair[0]]
+            pair = [pair[0], _blank_box(box_w, theme)]
         for row in range(3):
             line = Text()
             for j, box in enumerate(pair):
                 if j:
                     line.append("  ")
                 line += box[row]
-            lines.append(_pad(line, width))
+            lines.append(_center(line, width))
     return [*lines, *[_blank()] * (budget.seats - len(lines))]
 
 
@@ -338,9 +356,10 @@ def _community_lines(view: SeatView, ui: UiState, ctx: FrameContext, tier: Tier,
                 line.append(" ")
             line += card[row]
         card_rows.append(line)
-    box_w = cell_len(card_rows[0].plain) + 2
+    title = f"公共牌  ·  底池 {_fmt(view.pot_total)}"
+    box_w = max(cell_len(card_rows[0].plain) + 4, cell_len(title) + 2)
     pulse = ui.pot_pulse
-    lines = _boxed(card_rows, f"底池 {_fmt(view.pot_total)}", theme.accent if pulse else theme.border, box_w)
+    lines = _boxed(card_rows, title, theme.accent if pulse else theme.border, box_w)
     if pulse:
         lines[0] = Text("◈ ") + lines[0].copy()
     centered = [_center(line, width) for line in lines]
@@ -368,10 +387,19 @@ def _hero_lines(view: SeatView, ui: UiState, ctx: FrameContext, tier: Tier, widt
                 line.append("   ")
             line += card[row]
         rows.append(_center(line, width))
-    if len(view.community) >= 3:
-        rows.append(_center(Text(find_best_hand((*view.hole, *view.community)).label(), style=theme.dim), width))
-    else:
-        rows.append(_blank())
+    hero_info = next((s for s in view.seats if ctx.viewer is not None and s.name == ctx.viewer), None)
+    if hero_info is None:
+        hero_info = next((s for s in view.seats if s.index == _anchor(view, ctx)), None)
+    hero_name = hero_info.name if hero_info is not None else (ctx.viewer or "你的手牌")
+    hand_label = (
+        find_best_hand((*view.hole, *view.community)).label()
+        if len(view.community) >= 3 else "等待公共牌"
+    )
+    stack = f"  {_fmt(hero_info.stack)}" if hero_info is not None else ""
+    bet = f"  注 {_fmt(hero_info.street_bet)}" if hero_info is not None and hero_info.street_bet else ""
+    winner = "★ " if hero_name in ui.winners else ""
+    rows.append(_center(Text(f"{winner}◆ {hero_name}{stack}{bet}  ·  {hand_label}",
+                             style=theme.gold if winner else theme.dim), width))
     return [*rows, *[_blank()] * (budget.hero - len(rows))]
 
 
@@ -395,7 +423,7 @@ def _action_line_slot(view: SeatView, ui: UiState, ctx: FrameContext) -> Text:
     return _blank()
 
 
-def _action_box_lines(view: SeatView, ui: UiState, ctx: FrameContext, budget: Budget) -> list[Text]:
+def _action_box_lines(view: SeatView, ui: UiState, ctx: FrameContext, budget: Budget, width: int) -> list[Text]:
     theme = ctx.theme
     if ui.confirm_quit:
         rows = [Text("再按 Enter / Ctrl-C 确认退出 · Esc 取消", style=theme.bad), _blank()]
@@ -410,7 +438,7 @@ def _action_box_lines(view: SeatView, ui: UiState, ctx: FrameContext, budget: Bu
         title, border = "等待", theme.border
     inner = max(cell_len(row.plain) for row in rows) + 4
     lines = _boxed(rows, title, border, inner)
-    return [*lines, *[_blank()] * (budget.action - len(lines))]
+    return [*[_center(line, width) for line in lines], *[_blank()] * (budget.action - len(lines))]
 
 
 def _panel_rows(panel: ActionPanel, countdown: int | None, theme: Theme) -> list[Text]:
@@ -481,6 +509,7 @@ def _overlay_lines(view: SeatView, ui: UiState, ctx: FrameContext, rows: int, wi
 
 def _boxed(body: list[Text], title: str, style: str, inner: int) -> list[Text]:
     label = f"─ {title} " if title else "─ "
+    inner = max(inner, cell_len(label))
     fill = max(inner - cell_len(label), 0)
     lines = [Text(f"╭{label}{'─' * fill}╮", style=style)]
     for row in body:

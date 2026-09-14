@@ -40,12 +40,13 @@ def build_view(to_act=1, legal=None, hand_no=1, pot=30) -> SeatView:
     )
 
 
-def make_screen(act_seconds: float = 30) -> GameScreen:
-    console = Console(file=io.StringIO(), force_terminal=True, width=100, height=40,
+def make_screen(act_seconds: float = 30, display: str = "rich", width: int = 100, height: int = 40) -> GameScreen:
+    console = Console(file=io.StringIO(), force_terminal=True, width=width, height=height,
                       color_system="truecolor", highlight=False, legacy_windows=False)
     terminal = Terminal(console)
     terminal.tty = True  # simulate a TTY without touching the real stdin
-    return GameScreen(terminal, FrameContext(THEME, "本地练习", "你", (5, 10)), act_seconds)
+    return GameScreen(terminal, FrameContext(THEME, "本地练习", "你", (5, 10)), act_seconds,
+                      display=display)
 
 
 def output(screen: GameScreen) -> str:
@@ -82,6 +83,26 @@ def test_act_consumes_injected_keys_until_action() -> None:
         screen._keys.put_nowait("enter")
         action = await asyncio.wait_for(task, 2)
         assert action == Action("call")
+        await screen.close()
+
+    asyncio.run(run())
+
+
+def test_simple_mode_raise_key_survives_narrow_frame() -> None:
+    """R must submit a raise even when the compact action row is cropped."""
+    screen = make_screen(display="simple", width=80, height=24)
+
+    async def run() -> None:
+        await screen.start()
+        view = build_view(to_act=0, legal=FACING_BET)
+        await screen.show(view)
+        task = asyncio.create_task(screen.act(view))
+        await asyncio.sleep(0.05)
+        screen._keys.put_nowait("r")
+        await asyncio.sleep(0.05)
+        screen._keys.put_nowait("enter")
+        action = await asyncio.wait_for(task, 2)
+        assert action == Action("raise", FACING_BET.min_raise_to)
         await screen.close()
 
     asyncio.run(run())

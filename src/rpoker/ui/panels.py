@@ -31,6 +31,10 @@ def auto_action(legal: LegalActions) -> Action:
 
 
 def parse_action(answer: str, legal: LegalActions) -> Action | None:
+    # KeyReader preserves the physical key's case when Shift is held, while
+    # the pipe-based line reader already lowercases input. Normalize here so
+    # both input paths have exactly the same action semantics.
+    answer = answer.strip().lower()
     if answer == "f":
         return Action("fold")
     if answer == "c":
@@ -75,6 +79,10 @@ class ActionPanel:
 
     def handle(self, key: str, pot_total: int) -> Action | None:
         """Consume one action-scope key. Returns an Action to submit, None to keep waiting."""
+        # A shifted letter arrives as an uppercase key from prompt_toolkit.
+        # Special names such as ``shift-left`` and ``enter`` are unchanged.
+        if len(key) == 1 and key.isalpha():
+            key = key.lower()
         if self.raising:
             return self._handle_raise(key, pot_total)
         items = self.items()

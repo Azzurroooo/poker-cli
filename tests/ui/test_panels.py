@@ -39,6 +39,11 @@ def test_handle_hotkeys() -> None:
     assert ActionPanel.build(full).handle("f", 100) == Action("fold")
     assert ActionPanel.build(full).handle("c", 100) == Action("call")
     assert ActionPanel.build(full).handle("a", 100) == Action("allin")
+    assert ActionPanel.build(full).handle("F", 100) == Action("fold")
+    assert ActionPanel.build(full).handle("C", 100) == Action("call")
+    uppercase_raise = ActionPanel.build(full)
+    assert uppercase_raise.handle("R", 100) is None
+    assert uppercase_raise.raising
     free = legal()
     assert ActionPanel.build(free).handle("c", 100) == Action("check")
     assert ActionPanel.build(free).handle("a", 100) is None  # no all-in over no bet
@@ -83,6 +88,8 @@ def test_parse_action_static_forms() -> None:
     assert parse_action("c", full) == Action("call")
     assert parse_action("a", full) == Action("allin")
     assert parse_action("r240", full) == Action("raise", 240)
+    assert parse_action("R240", full) == Action("raise", 240)
+    assert parse_action("  R240  ", full) == Action("raise", 240)
     assert parse_action("r79", full) is None
     assert parse_action("r1001", full) is None
     assert parse_action("x", full) is None
